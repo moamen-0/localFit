@@ -1,295 +1,188 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Fitness Backend Test</title>
-    <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
+    <title>WebSocket Frame Test</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        .container {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        .video-container {
-            display: flex;
-            gap: 20px;
-        }
-        video, #processedFeed {
-            width: 380px;
-            height: 285px;
-            border: 1px solid #ddd;
-            background: #f0f0f0;
-        }
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
-        }
-        button {
-            padding: 10px 15px;
-            background-color: #4CAF50;
-            border: none;
-            color: white;
-            font-size: 16px;
-            cursor: pointer;
-            border-radius: 4px;
-        }
-        button:disabled {
-            background-color: #cccccc;
-        }
-        button.disconnect {
-            background-color: #f44336;
-        }
-        .feedback {
-            padding: 15px;
-            border-radius: 5px;
-            border: 1px solid #ddd;
-            min-height: 50px;
-        }
-        .counters {
-            display: flex;
-            gap: 20px;
-        }
-        .counter {
-            font-size: 24px;
-            font-weight: bold;
-        }
-        .server-url {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-        .server-url input {
-            flex-grow: 1;
-            padding: 10px;
-            font-size: 16px;
-        }
+        body { font-family: Arial; padding: 20px; }
+        .container { display: flex; gap: 20px; }
+        .panel { border: 1px solid #ddd; padding: 10px; width: 320px; }
+        button { padding: 10px; margin: 5px; }
+        #logContainer { height: 200px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-top: 20px; }
     </style>
 </head>
 <body>
-    <h1>Fitness Backend Test Client</h1>
-    
+    <h1>WebSocket Frame Test</h1>
+    <button id="startCamera">Start Camera</button>
+    <button id="connect">Connect to Server</button>
+    <button id="sendFrame">Send Single Frame</button>
+    <button id="startFrames">Start Sending Frames</button>
+    <button id="stopFrames">Stop Frames</button>
+
     <div class="container">
-        <div class="server-url">
-            <label for="serverUrl">Server URL:</label>
-            <input type="text" id="serverUrl" value="https://localfit.fly.dev/" />
+        <div class="panel">
+            <h3>Camera Feed</h3>
+            <video id="videoElement" width="320" height="240" autoplay></video>
         </div>
-        
-        <div class="controls">
-            <button id="startBtn">Start Camera</button>
-            <button id="connectBtn" disabled>Connect to Server</button>
-            <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
-        </div>
-        
-        <div class="video-container">
-            <div>
-                <h3>Camera Feed</h3>
-                <video id="videoElement" autoplay playsinline></video>
-            </div>
-            <div>
-                <h3>Processed Feed</h3>
-                <img id="processedFeed" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="Processed Feed" />
-            </div>
-        </div>
-        
-        <div class="counters">
-            <div class="counter">Left: <span id="leftCounter">0</span></div>
-            <div class="counter">Right: <span id="rightCounter">0</span></div>
-        </div>
-        
-        <div>
-            <h3>Feedback:</h3>
-            <div id="feedback" class="feedback"></div>
-        </div>
-        
-        <div>
-            <h3>Connection Status:</h3>
-            <div id="status"></div>
+        <div class="panel">
+            <h3>Server Response</h3>
+            <img id="responseImage" width="320" height="240" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
         </div>
     </div>
 
+    <div>
+        <p>Status: <span id="status">Not connected</span></p>
+        <p>Left Counter: <span id="leftCounter">0</span></p>
+        <p>Right Counter: <span id="rightCounter">0</span></p>
+        <p>Feedback: <span id="feedback"></span></p>
+    </div>
+
+    <div id="logContainer">
+        <h3>Logs:</h3>
+        <div id="logs"></div>
+    </div>
+
     <script>
-        // DOM Elements
-        const videoElement = document.getElementById('videoElement');
-        const processedFeed = document.getElementById('processedFeed');
-        const startBtn = document.getElementById('startBtn');
-        const connectBtn = document.getElementById('connectBtn');
-        const disconnectBtn = document.getElementById('disconnectBtn');
-        const serverUrlInput = document.getElementById('serverUrl');
-        const feedbackElement = document.getElementById('feedback');
-        const leftCounterElement = document.getElementById('leftCounter');
-        const rightCounterElement = document.getElementById('rightCounter');
-        const statusElement = document.getElementById('status');
-        
-        // Variables
-        let stream;
+        const serverUrl = 'https://exercisedeploy-791062084724.us-central1.run.app';
         let socket;
         let sessionId;
+        let stream;
         let frameInterval;
-        let lastAudioKey;
-        
-        // Audio elements for feedback
-        const audioElements = {};
-        
+
+        // DOM elements
+        const videoElement = document.getElementById('videoElement');
+        const responseImage = document.getElementById('responseImage');
+        const statusElement = document.getElementById('status');
+        const leftCounterElement = document.getElementById('leftCounter');
+        const rightCounterElement = document.getElementById('rightCounter');
+        const feedbackElement = document.getElementById('feedback');
+        const logsElement = document.getElementById('logs');
+
+        // Add log entry with timestamp
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${timestamp}] ${message}`;
+            logsElement.appendChild(logEntry);
+            logsElement.scrollTop = logsElement.scrollHeight;
+        }
+
         // Start camera
-        startBtn.addEventListener('click', async () => {
+        document.getElementById('startCamera').addEventListener('click', async () => {
             try {
                 stream = await navigator.mediaDevices.getUserMedia({ video: true });
                 videoElement.srcObject = stream;
-                startBtn.disabled = true;
-                connectBtn.disabled = false;
-                updateStatus('Camera started');
+                log('Camera started');
+                statusElement.textContent = 'Camera started';
             } catch (error) {
-                updateStatus(`Error starting camera: ${error.message}`);
+                log(`Camera error: ${error.message}`);
+                statusElement.textContent = `Error: ${error.message}`;
             }
         });
-        
+
         // Connect to server
-        connectBtn.addEventListener('click', () => {
-            const serverUrl = serverUrlInput.value.trim();
-            if (!serverUrl) {
-                updateStatus('Please enter a valid server URL');
-                return;
-            }
+        document.getElementById('connect').addEventListener('click', () => {
+            log(`Connecting to ${serverUrl}...`);
+            statusElement.textContent = 'Connecting...';
             
-            // Initialize Socket.IO connection
             socket = io(serverUrl, {
                 transports: ['websocket'],
-                reconnection: true,
-                reconnectionDelay: 1000,
-                reconnectionDelayMax: 5000,
-                reconnectionAttempts: 5
+                reconnection: true
             });
             
-            // Socket event handlers
             socket.on('connect', () => {
-                updateStatus('Connected to server');
-                connectBtn.disabled = true;
-                disconnectBtn.disabled = false;
-            });
-            
-            socket.on('disconnect', () => {
-                updateStatus('Disconnected from server');
-                stopFrameSending();
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
+                log('Connected to server');
+                statusElement.textContent = 'Connected';
             });
             
             socket.on('session_id', (data) => {
                 sessionId = data.session_id;
-                updateStatus(`Session established: ${sessionId}`);
-                startFrameSending();
+                log(`Session established: ${sessionId}`);
+                statusElement.textContent = `Session: ${sessionId.substring(0, 8)}...`;
             });
             
-            socket.on('feedback', (data) => {
-                // Update processed image
+            socket.on('frame', (data) => {
                 if (data.image) {
-                    processedFeed.src = data.image;
-                }
-                
-                // Update counters
-                leftCounterElement.textContent = data.left_counter || 0;
-                rightCounterElement.textContent = data.right_counter || 0;
-                
-                // Update feedback text
-                feedbackElement.textContent = data.feedback || '';
-                
-                // Play audio if available
-                if (data.audio_key && data.audio_key !== lastAudioKey) {
-                    playAudio(data.audio_key);
-                    lastAudioKey = data.audio_key;
+                    responseImage.src = data.image;
+                    leftCounterElement.textContent = data.left_counter || 0;
+                    rightCounterElement.textContent = data.right_counter || 0;
+                    feedbackElement.textContent = data.feedback || '';
+                    log(`Received frame: L:${data.left_counter} R:${data.right_counter}`);
                 }
             });
             
             socket.on('error', (data) => {
-                updateStatus(`Error: ${data.message}`);
+                log(`Error: ${data.message}`);
+                statusElement.textContent = `Error: ${data.message}`;
+            });
+            
+            socket.on('disconnect', () => {
+                log('Disconnected from server');
+                statusElement.textContent = 'Disconnected';
+                if (frameInterval) {
+                    clearInterval(frameInterval);
+                    frameInterval = null;
+                }
             });
         });
-        
-        // Disconnect from server
-        disconnectBtn.addEventListener('click', () => {
-            if (socket) {
-                stopFrameSending();
-                socket.disconnect();
-                socket = null;
-                sessionId = null;
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
-                processedFeed.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
-                updateStatus('Disconnected from server');
+
+        // Send a single frame
+        document.getElementById('sendFrame').addEventListener('click', () => {
+            if (!socket || !sessionId || !stream) {
+                log('Cannot send frame: Missing socket, session, or camera');
+                return;
             }
+            
+            sendOneFrame();
         });
-        
-        // Start sending frames to server
-        function startFrameSending() {
+
+        // Start sending frames at regular intervals
+        document.getElementById('startFrames').addEventListener('click', () => {
+            if (!socket || !sessionId || !stream) {
+                log('Cannot start frames: Missing socket, session, or camera');
+                return;
+            }
+            
             if (frameInterval) {
                 clearInterval(frameInterval);
             }
             
+            log('Starting to send frames');
+            frameInterval = setInterval(sendOneFrame, 100); // 5fps
+        });
+
+        // Stop sending frames
+        document.getElementById('stopFrames').addEventListener('click', () => {
+            if (frameInterval) {
+                clearInterval(frameInterval);
+                frameInterval = null;
+                log('Stopped sending frames');
+            }
+        });
+
+        // Function to capture and send a single frame
+        function sendOneFrame() {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
-            canvas.width = 640;
-            canvas.height = 480;
+            canvas.width = videoElement.videoWidth || 320;
+            canvas.height = videoElement.videoHeight || 240;
             
-            frameInterval = setInterval(() => {
-                if (!socket || !sessionId) return;
-                
-                // Draw video frame to canvas
-                ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
-                
-                // Convert to base64 and send to server
+            // Draw video frame to canvas
+            ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+            
+            // Convert to base64
+            try {
                 const base64Image = canvas.toDataURL('image/jpeg', 0.7);
                 
                 socket.emit('frame', {
                     session_id: sessionId,
                     image: base64Image
                 });
-            }, 100); // Send at 10fps
-        }
-        
-        // Stop sending frames
-        function stopFrameSending() {
-            if (frameInterval) {
-                clearInterval(frameInterval);
-                frameInterval = null;
-            }
-        }
-        
-        // Play audio feedback
-        async function playAudio(audioKey) {
-            try {
-                const serverUrl = serverUrlInput.value.trim();
-                const audioUrl = `${serverUrl}/api/audio/${audioKey}`;
                 
-                if (!audioElements[audioKey]) {
-                    audioElements[audioKey] = new Audio(audioUrl);
-                }
-                
-                // Stop any currently playing audio
-                Object.values(audioElements).forEach(audio => {
-                    audio.pause();
-                    audio.currentTime = 0;
-                });
-                
-                // Play the new audio
-                audioElements[audioKey].play();
+                log('Frame sent');
             } catch (error) {
-                console.error('Error playing audio:', error);
+                log(`Error sending frame: ${error.message}`);
             }
-        }
-        
-        // Update status message
-        function updateStatus(message) {
-            const timestamp = new Date().toLocaleTimeString();
-            statusElement.innerHTML += `<div>[${timestamp}] ${message}</div>`;
-            // Auto-scroll to bottom
-            statusElement.scrollTop = statusElement.scrollHeight;
         }
     </script>
 </body>

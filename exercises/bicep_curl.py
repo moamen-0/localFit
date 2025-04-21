@@ -29,7 +29,8 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
     image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = pose.process(image)
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    
+    image = cv2.resize(frame, (320, 240))  # Lower resolution
+
     # Variables for tracking violations
     arm_violated = {'left': False, 'right': False}
     violation_types = {'sagittal': False, 'shoulder': False, 'elbow': False}
