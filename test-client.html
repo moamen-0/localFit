@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fitness Backend Test</title>
+    <script src="https://cdn.socket.io/4.4.1/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .video-container {
+            display: flex;
+            gap: 20px;
+        }
+        video, #processedFeed {
+            width: 380px;
+            height: 285px;
+            border: 1px solid #ddd;
+            background: #f0f0f0;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+        }
+        button.disconnect {
+            background-color: #f44336;
+        }
+        .feedback {
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            min-height: 50px;
+        }
+        .counters {
+            display: flex;
+            gap: 20px;
+        }
+        .counter {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .server-url {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .server-url input {
+            flex-grow: 1;
+            padding: 10px;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Fitness Backend Test Client</h1>
+    
+    <div class="container">
+        <div class="server-url">
+            <label for="serverUrl">Server URL:</label>
+            <input type="text" id="serverUrl" value="https://localfit.fly.dev/" />
+        </div>
+        
+        <div class="controls">
+            <button id="startBtn">Start Camera</button>
+            <button id="connectBtn" disabled>Connect to Server</button>
+            <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
+        </div>
+        
+        <div class="video-container">
+            <div>
+                <h3>Camera Feed</h3>
+                <video id="videoElement" autoplay playsinline></video>
+            </div>
+            <div>
+                <h3>Processed Feed</h3>
+                <img id="processedFeed" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="Processed Feed" />
+            </div>
+        </div>
+        
+        <div class="counters">
+            <div class="counter">Left: <span id="leftCounter">0</span></div>
+            <div class="counter">Right: <span id="rightCounter">0</span></div>
+        </div>
+        
+        <div>
+            <h3>Feedback:</h3>
+            <div id="feedback" class="feedback"></div>
+        </div>
+        
+        <div>
+            <h3>Connection Status:</h3>
+            <div id="status"></div>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const videoElement = document.getElementById('videoElement');
+        const processedFeed = document.getElementById('processedFeed');
+        const startBtn = document.getElementById('startBtn');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const serverUrlInput = document.getElementById('serverUrl');
+        const feedbackElement = document.getElementById('feedback');
+        const leftCounterElement = document.getElementById('leftCounter');
+        const rightCounterElement = document.getElementById('rightCounter');
+        const statusElement = document.getElementById('status');
+        
+        // Variables
+        let stream;
+        let socket;
+        let sessionId;
+        let frameInterval;
+        let lastAudioKey;
+        
+        // Audio elements for feedback
+        const audioElements = {};
+        
+        // Start camera
+        startBtn.addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                videoElement.srcObject = stream;
+                startBtn.disabled = true;
+                connectBtn.disabled = false;
+                updateStatus('Camera started');
+            } catch (error) {
+                updateStatus(`Error starting camera: ${error.message}`);
+            }
+        });
+        
+        // Connect to server
+        connectBtn.addEventListener('click', () => {
+            const serverUrl = serverUrlInput.value.trim();
+            if (!serverUrl) {
+                updateStatus('Please enter a valid server URL');
+                return;
+            }
+            
+            // Initialize Socket.IO connection
+            socket = io(serverUrl, {
+                transports: ['websocket'],
+                reconnection: true,
+                reconnectionDelay: 1000,
+                reconnectionDelayMax: 5000,
+                reconnectionAttempts: 5
+            });
+            
+            // Socket event handlers
+            socket.on('connect', () => {
+                updateStatus('Connected to server');
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+            });
+            
+            socket.on('disconnect', () => {
+                updateStatus('Disconnected from server');
+                stopFrameSending();
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+            });
+            
+            socket.on('session_id', (data) => {
+                sessionId = data.session_id;
+                updateStatus(`Session established: ${sessionId}`);
+                startFrameSending();
+            });
+            
+            socket.on('feedback', (data) => {
+                // Update processed image
+                if (data.image) {
+                    processedFeed.src = data.image;
+                }
+                
+                // Update counters
+                leftCounterElement.textContent = data.left_counter || 0;
+                rightCounterElement.textContent = data.right_counter || 0;
+                
+                // Update feedback text
+                feedbackElement.textContent = data.feedback || '';
+                
+                // Play audio if available
+                if (data.audio_key && data.audio_key !== lastAudioKey) {
+                    playAudio(data.audio_key);
+                    lastAudioKey = data.audio_key;
+                }
+            });
+            
+            socket.on('error', (data) => {
+                updateStatus(`Error: ${data.message}`);
+            });
+        });
+        
+        // Disconnect from server
+        disconnectBtn.addEventListener('click', () => {
+            if (socket) {
+                stopFrameSending();
+                socket.disconnect();
+                socket = null;
+                sessionId = null;
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                processedFeed.src = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
+                updateStatus('Disconnected from server');
+            }
+        });
+        
+        // Start sending frames to server
+        function startFrameSending() {
+            if (frameInterval) {
+                clearInterval(frameInterval);
+            }
+            
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 640;
+            canvas.height = 480;
+            
+            frameInterval = setInterval(() => {
+                if (!socket || !sessionId) return;
+                
+                // Draw video frame to canvas
+                ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                
+                // Convert to base64 and send to server
+                const base64Image = canvas.toDataURL('image/jpeg', 0.7);
+                
+                socket.emit('frame', {
+                    session_id: sessionId,
+                    image: base64Image
+                });
+            }, 100); // Send at 10fps
+        }
+        
+        // Stop sending frames
+        function stopFrameSending() {
+            if (frameInterval) {
+                clearInterval(frameInterval);
+                frameInterval = null;
+            }
+        }
+        
+        // Play audio feedback
+        async function playAudio(audioKey) {
+            try {
+                const serverUrl = serverUrlInput.value.trim();
+                const audioUrl = `${serverUrl}/api/audio/${audioKey}`;
+                
+                if (!audioElements[audioKey]) {
+                    audioElements[audioKey] = new Audio(audioUrl);
+                }
+                
+                // Stop any currently playing audio
+                Object.values(audioElements).forEach(audio => {
+                    audio.pause();
+                    audio.currentTime = 0;
+                });
+                
+                // Play the new audio
+                audioElements[audioKey].play();
+            } catch (error) {
+                console.error('Error playing audio:', error);
+            }
+        }
+        
+        // Update status message
+        function updateStatus(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            statusElement.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+            // Auto-scroll to bottom
+            statusElement.scrollTop = statusElement.scrollHeight;
+        }
+    </script>
+</body>
+</html>

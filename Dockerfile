@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies for OpenCV and Mediapipe
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -14,20 +14,17 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
+# Copy requirements
 COPY requirements.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies including gevent
+RUN pip install --no-cache-dir -r requirements.txt gunicorn gevent
 
-# Copy the application code
+# Copy application code
 COPY . .
 
-# Create audio directory (will be populated at runtime)
-RUN mkdir -p audio
-
-# Expose the port
+# Expose Cloud Run port
 EXPOSE 8080
 
-# Command to run the application
-CMD ["python", "app.py"]
+# Run using gunicorn with gevent worker (required for WebSocket support)
+CMD ["gunicorn", "-b", ":8080", "app:app", "--worker-class", "gevent"]
