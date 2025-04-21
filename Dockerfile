@@ -27,4 +27,4 @@ COPY . .
 EXPOSE 8080
 
 # Run using gunicorn with gevent worker (required for WebSocket support)
-CMD ["gunicorn", "-b", ":8080", "app:app", "--worker-class", "gevent"]
+CMD ["python", "app.py"]
