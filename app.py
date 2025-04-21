@@ -159,7 +159,7 @@ def handle_frame(data):
         print(f"Error processing frame: {e}")
         emit('error', {'message': f'Error processing frame: {str(e)}'})
 
-# RESTful API endpoints
+# RESTful API endpoint
 @app.route('/api/start_session', methods=['POST'])
 def start_session():
     session_id = str(uuid.uuid4())
