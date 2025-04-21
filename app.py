@@ -9,6 +9,8 @@ import time
 import base64
 import threading
 import uuid
+import eventlet
+eventlet.monkey_patch() 
 from gtts import gTTS
 import mediapipe as mp
 from utils import calculate_angle, mp_pose, pose
@@ -20,7 +22,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Configure Socket.IO for real-time communication
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Initialize pygame mixer for audio feedback
 pygame.mixer.init()
