@@ -18,7 +18,7 @@ steps:
   args:
   - 'run'
   - 'deploy'
-  - 'ai-fitness-trainer'
+  - 'exercisedeploy'
   - '--image'
   - 'gcr.io/$PROJECT_ID/ai-fitness-trainer:$COMMIT_SHA'
   - '--region'
@@ -26,8 +26,20 @@ steps:
   - '--platform'
   - 'managed'
   - '--allow-unauthenticated'
+  - '--port'
+  - '8080'
+  - '--min-instances'
+  - '1'
+  - '--memory'
+  - '1Gi'
+  - '--cpu'
+  - '1'
   - '--set-env-vars'
-  - 'WEBSOCKET_ENABLED=true'
+  - 'PYTHONUNBUFFERED=1,EVENTLET_NO_GREENDNS=yes'
+  - '--concurrency'
+  - '80'
+  - '--timeout'
+  - '300s'
 
 
 options:

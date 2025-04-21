@@ -10,19 +10,24 @@ import base64
 import threading
 import uuid
 import eventlet
+# Move monkey patching before any other imports
 eventlet.monkey_patch() 
 from gtts import gTTS
 import mediapipe as mp
 from utils import calculate_angle, mp_pose, pose
-from exercises.bicep_curl import process_frame  # Modified function we'll create
+from exercises.bicep_curl import process_frame
 
 # Initialize Flask app with CORS support
 from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Configure Socket.IO for real-time communication
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+# Configure Socket.IO with explicit async mode and correct configuration
+socketio = SocketIO(app, 
+                   cors_allowed_origins="*", 
+                   async_mode='eventlet',
+                   engineio_logger=True,  # Add logging
+                   logger=True)           # Add more logging
 
 # Initialize pygame mixer for audio feedback
 pygame.mixer.init()
@@ -81,6 +86,11 @@ class UserSession:
         self.last_feedback_time = 0
         self.feedback_cooldown = 2
 
+# Add a route for the root path to serve the index.html
+@app.route('/')
+def index():
+    return app.send_static_file('index.html')
+
 # Socket.IO event handlers
 @socketio.on('connect')
 def handle_connect():
@@ -93,6 +103,12 @@ def handle_connect():
 def handle_disconnect():
     print(f"Client disconnected")
     # Sessions are cleaned up separately based on session_id
+
+@socketio.on('select_exercise')
+def handle_select_exercise(data):
+    exercise = data.get('exercise')
+    print(f"Exercise selected: {exercise}")
+    emit('exercise_selected', {'status': 'success', 'exercise': exercise})
 
 @socketio.on('frame')
 def handle_frame(data):
@@ -150,7 +166,7 @@ def handle_frame(data):
         encoded_img = base64.b64encode(buffer).decode('utf-8')
         
         # Send feedback to client
-        emit('feedback', {
+        emit('frame', {
             'image': f'data:image/jpeg;base64,{encoded_img}',
             'left_counter': session.left_counter,
             'right_counter': session.right_counter,
@@ -205,8 +221,11 @@ cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
 cleanup_thread.start()
 
 if __name__ == '__main__':
+    # Ensure the static folder exists
+    os.makedirs('static', exist_ok=True)
+    
     # Get port from environment variable for Cloud compatibility
     port = int(os.environ.get('PORT', 8080))
     
-    # In production, use gevent or another production-ready server
-    socketio.run(app, host='0.0.0.0', port=port, debug=False)
+    # Run with eventlet
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=True)
