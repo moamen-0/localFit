@@ -1,10 +1,11 @@
+import os
+os.environ['SDL_AUDIODRIVER'] = 'dummy'
 from flask import Flask, Response, request, jsonify
 from flask_socketio import SocketIO, emit
 import cv2
 import numpy as np
 import pygame
 import time
-import os
 import base64
 import threading
 import uuid
