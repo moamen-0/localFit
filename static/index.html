@@ -25,14 +25,14 @@
         .video-container {
             text-align: center;
             margin: 20px 0;
-            min-height: 360px;
+            min-height: 480px;
             position: relative;
         }
         #videoElement {
             max-width: 100%;
             border: 3px solid #444;
             border-radius: 5px;
-            min-height: 360px;
+            min-height: 480px;
             max-height: 480px;
             background: #eee;
         }
@@ -98,11 +98,15 @@
             border-radius: 3px;
             font-size: 12px;
         }
-        .settings {
-            margin: 15px 0;
+        .advanced-settings {
+            margin: 10px 0;
             padding: 10px;
             background: #f8f9fa;
             border-radius: 5px;
+            display: none;
+        }
+        .advanced-settings.visible {
+            display: block;
         }
         .setting-row {
             display: flex;
@@ -115,6 +119,11 @@
         .setting-row input, .setting-row select {
             flex: 0 0 150px;
         }
+        .toggle-settings {
+            background-color: #6c757d;
+            margin: 10px auto;
+            display: block;
+        }
     </style>
 </head>
 <body>
@@ -122,28 +131,29 @@
         <h1>Fitness Exercise Trainer</h1>
         
         <button id="startCamera">Start Camera</button>
+        <button id="toggleSettings" class="toggle-settings">Show Advanced Settings</button>
         
         <div class="status" id="connectionStatus">
             Not connected
         </div>
 
-        <div class="settings">
+        <div class="advanced-settings" id="advancedSettings">
             <h3>Performance Settings</h3>
             <div class="setting-row">
                 <label for="frameRate">Frame Rate:</label>
-                <input type="range" id="frameRate" min="5" max="30" value="10" />
-                <span id="frameRateValue">10 FPS</span>
+                <input type="range" id="frameRate" min="5" max="30" value="15" />
+                <span id="frameRateValue">15 FPS</span>
             </div>
             <div class="setting-row">
                 <label for="quality">Image Quality:</label>
-                <input type="range" id="quality" min="1" max="10" value="5" />
-                <span id="qualityValue">50%</span>
+                <input type="range" id="quality" min="1" max="10" value="7" />
+                <span id="qualityValue">70%</span>
             </div>
             <div class="setting-row">
                 <label for="resolution">Resolution:</label>
                 <select id="resolution">
-                    <option value="320x240" selected>320x240 (Low)</option>
-                    <option value="480x360">480x360 (Medium)</option>
+                    <option value="320x240">320x240 (Low)</option>
+                    <option value="480x360" selected>480x360 (Medium)</option>
                     <option value="640x480">640x480 (High)</option>
                 </select>
             </div>
@@ -168,7 +178,7 @@
         
         <div class="video-container">
             <img id="videoElement" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="Exercise Feed">
-            <div id="fpsDisplay">0 FPS | Sent: 0 | Received: 0</div>
+            <div id="fpsDisplay">0 FPS</div>
         </div>
         
         <div id="feedback"></div>
@@ -183,16 +193,16 @@
         let lastFpsTime = 0;
         let requestAnimationId = null;
         let lastFrameTime = 0;
-        let frameRate = 10; // Default lower frame rate
+        let frameRate = 15; // Balanced default frame rate
         let frameInterval = 1000 / frameRate;
-        let compressionQuality = 0.5; // Lower default image quality
+        let compressionQuality = 0.7; // Balanced image quality
         let streamActive = false;
         let videoCapture = null;
         let canvas = null;
         let ctx = null;
-        let framesSent = 0;
         let framesReceived = 0;
-        let resolution = { width: 320, height: 240 }; // Lower default resolution
+        let framesSent = 0;
+        let resolution = { width: 480, height: 360 }; // Medium default resolution
         let socketQueue = 0; // Track pending socket.io messages
         let backpressureLimit = 3; // Max pending frames before applying backpressure
         
@@ -203,6 +213,8 @@
         const leftCounterElement = document.getElementById('leftCounter');
         const rightCounterElement = document.getElementById('rightCounter');
         const fpsDisplay = document.getElementById('fpsDisplay');
+        const toggleSettingsButton = document.getElementById('toggleSettings');
+        const advancedSettings = document.getElementById('advancedSettings');
         
         // UI controls
         const frameRateSlider = document.getElementById('frameRate');
@@ -210,6 +222,13 @@
         const qualitySlider = document.getElementById('quality');
         const qualityValue = document.getElementById('qualityValue');
         const resolutionSelect = document.getElementById('resolution');
+
+        // Toggle advanced settings
+        toggleSettingsButton.addEventListener('click', () => {
+            advancedSettings.classList.toggle('visible');
+            toggleSettingsButton.textContent = advancedSettings.classList.contains('visible') ? 
+                'Hide Advanced Settings' : 'Show Advanced Settings';
+        });
 
         // Event listeners for settings
         frameRateSlider.addEventListener('input', () => {
@@ -253,7 +272,7 @@
                 const [width, height] = resolutionSelect.value.split('x').map(Number);
                 resolution = { width, height };
                 
-                // Start camera with lower resolution for better performance
+                // Start camera
                 localStream = await navigator.mediaDevices.getUserMedia({ 
                     video: { 
                         width: { ideal: width },
@@ -321,6 +340,7 @@
             
             socket.on('frame', function(data) {
                 socketQueue--; // Reduce backpressure counter
+                socketQueue = Math.max(0, socketQueue); // Ensure it doesn't go negative
                 
                 if (data.image) {
                     videoElement.src = data.image;
@@ -382,7 +402,7 @@
                 // Draw video frame to canvas with size optimization
                 ctx.drawImage(videoCapture, 0, 0, canvas.width, canvas.height);
                 
-                // Convert to base64 with lower quality
+                // Convert to base64 with quality setting
                 const base64Image = canvas.toDataURL('image/jpeg', compressionQuality);
                 
                 // Increase backpressure counter

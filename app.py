@@ -14,10 +14,9 @@ import eventlet
 eventlet.monkey_patch() 
 from gtts import gTTS
 import mediapipe as mp
-from utils import calculate_angle, mp_pose, pose, draw_landmarks_lite
+from utils import calculate_angle, mp_pose, pose
 import logging
 import queue
-import functools
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -48,11 +47,7 @@ active_sessions = {}
 
 # Processing queues for frame handling
 frame_queues = {}
-MAX_QUEUE_SIZE = 3  # Limit queue size to reduce memory usage
-
-# Processing thread pool
-thread_pool = {}
-MAX_THREADS = 8  # Limit max concurrent processing threads
+MAX_QUEUE_SIZE = 3  # Limit queue size to prevent memory issues
 
 # Audio feedback messages
 AUDIO_MESSAGES = {
@@ -92,7 +87,7 @@ def setup_audio():
 # Initialize audio
 sound_objects = setup_audio()
 
-# User session class with optimized structure
+# User session class to track exercise state
 class UserSession:
     def __init__(self, session_id):
         self.session_id = session_id
@@ -109,7 +104,6 @@ class UserSession:
         self.current_exercise = "bicep_curl"  # Default
         self.processing = False
         self.last_response_time = 0
-        self.skip_processing = 0  # Counter to skip frames
 
 # Process frame in worker thread to avoid blocking
 def process_frame_worker(session_id):
@@ -136,11 +130,6 @@ def process_frame_worker(session_id):
                     break
                 continue
                 
-            # Skip this frame if the queue has newer frames waiting
-            if not q.empty() and q.qsize() > 1:
-                q.task_done()
-                continue
-            
             # Process the frame
             try:
                 # Extract image data
@@ -153,7 +142,7 @@ def process_frame_worker(session_id):
                 if ',' in encoded_data:
                     encoded_data = encoded_data.split(',')[1]
                     
-                # Decode image with reduced precision
+                # Decode image
                 nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
@@ -161,32 +150,10 @@ def process_frame_worker(session_id):
                     q.task_done()
                     continue
                 
-                # Skip processing if we're falling behind (skip every other frame)
-                if session.skip_processing > 0:
-                    session.skip_processing -= 1
-                    # Just return the original frame with minimal processing
-                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
-                    encoded_img = base64.b64encode(buffer).decode('utf-8')
-                    
-                    # Send back to client
-                    socketio.emit('frame', {
-                        'image': f'data:image/jpeg;base64,{encoded_img}',
-                        'left_counter': session.left_counter,
-                        'right_counter': session.right_counter,
-                        'feedback': session.current_feedback,
-                        'audio_key': session.current_audio_key
-                    }, room=session_id)
-                    
-                    q.task_done()
-                    continue
-                
-                # Process frame with current exercise function
+                # Import the proper process_frame function
                 from exercises.bicep_curl import process_frame
                 
-                # Resize for faster processing
-                frame = cv2.resize(frame, (320, 240))  # Very low resolution for processing
-                
-                # Process the frame with optimized function
+                # Process the frame with the original function
                 processed_frame, results = process_frame(
                     frame, 
                     session.left_counter, 
@@ -209,18 +176,11 @@ def process_frame_worker(session_id):
                 session.last_feedback_time = results['last_feedback_time']
                 session.frame_count += 1
                 
-                # Calculate if we need to skip frames (if processing takes too long)
-                current_time = time.time()
-                frame_processing_time = current_time - session.last_response_time
+                # Record response time for metrics
+                session.last_response_time = time.time()
                 
-                # If processing took longer than 100ms, start skipping frames
-                if frame_processing_time > 0.1:  
-                    session.skip_processing = min(5, int(frame_processing_time * 10))  # Skip more frames for longer processing
-                    
-                session.last_response_time = current_time
-                
-                # Optimize image encoding
-                _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                # Optimize image encoding while keeping quality reasonable
+                _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 encoded_img = base64.b64encode(buffer).decode('utf-8')
                 
                 # Send feedback to client
@@ -261,7 +221,6 @@ def handle_connect():
     
     # Start a worker thread for this session
     thread = threading.Thread(target=process_frame_worker, args=(session_id,), daemon=True)
-    thread_pool[session_id] = thread
     thread.start()
     
     emit('session_id', {'session_id': session_id})
@@ -287,8 +246,6 @@ def handle_disconnect():
         except:
             pass
         del frame_queues[session_id]
-    
-    # Thread will exit on its own when it times out waiting for queue
 
 @socketio.on('select_exercise')
 def handle_select_exercise(data):
@@ -350,7 +307,6 @@ def start_session():
     
     # Start a worker thread for this session
     thread = threading.Thread(target=process_frame_worker, args=(session_id,), daemon=True)
-    thread_pool[session_id] = thread
     thread.start()
     
     return jsonify({'session_id': session_id})
@@ -382,8 +338,7 @@ def status():
     return jsonify({
         'status': 'running',
         'active_sessions': len(active_sessions),
-        'total_sessions': len(user_sessions),
-        'workers': len(thread_pool)
+        'total_sessions': len(user_sessions)
     })
 
 @app.route('/health', methods=['GET'])
@@ -397,7 +352,7 @@ def cleanup_sessions():
     while True:
         try:
             current_time = time.time()
-            inactive_timeout = 60  # 1 minute timeout (more aggressive)
+            inactive_timeout = 300  # 5 minutes
             
             for session_id, last_active in list(active_sessions.items()):
                 if current_time - last_active > inactive_timeout:
@@ -416,8 +371,8 @@ def cleanup_sessions():
         except Exception as e:
             logger.error(f"Error in session cleanup: {e}")
         
-        # Sleep for 30 seconds before next cleanup
-        time.sleep(30)
+        # Sleep for 60 seconds before next cleanup
+        time.sleep(60)
 
 # Start cleanup thread
 cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
