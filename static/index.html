@@ -87,6 +87,15 @@
         #startCamera {
             background-color: #28a745;
         }
+        #fpsDisplay {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            padding: 5px;
+            border-radius: 3px;
+        }
     </style>
 </head>
 <body>
@@ -118,6 +127,7 @@
         
         <div class="video-container">
             <img id="videoElement" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="Exercise Feed">
+            <div id="fpsDisplay">0 FPS</div>
         </div>
         
         <div id="feedback"></div>
@@ -128,6 +138,14 @@
         let currentExercise = null;
         let localStream = null;
         let sessionId = null;
+        let frameCount = 0;
+        let lastFpsTime = 0;
+        let requestAnimationId = null;
+        let lastFrameTime = 0;
+        let frameRate = 30; // Target frame rate
+        let frameInterval = 1000 / frameRate; // Milliseconds between frames
+        let compressionQuality = 0.6; // Image quality (0.0-1.0)
+        let streamActive = false;
         
         const startCameraButton = document.getElementById('startCamera');
         const connectionStatus = document.getElementById('connectionStatus');
@@ -135,12 +153,33 @@
         const feedbackElement = document.getElementById('feedback');
         const leftCounterElement = document.getElementById('leftCounter');
         const rightCounterElement = document.getElementById('rightCounter');
+        const fpsDisplay = document.getElementById('fpsDisplay');
+
+        // FPS Counter
+        function updateFPS() {
+            const now = performance.now();
+            const elapsed = now - lastFpsTime;
+            
+            if (elapsed >= 1000) { // Update every second
+                const fps = Math.round((frameCount * 1000) / elapsed);
+                fpsDisplay.textContent = `${fps} FPS`;
+                frameCount = 0;
+                lastFpsTime = now;
+            }
+        }
 
         // Start camera and connect to server
         startCameraButton.addEventListener('click', async () => {
             try {
-                // Start camera
-                localStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                // Start camera with lower resolution for better performance
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        frameRate: { ideal: 30 }
+                    } 
+                });
+                
                 startCameraButton.disabled = true;
                 startCameraButton.textContent = 'Camera Started';
                 
@@ -152,14 +191,18 @@
             }
         });
 
-        // Initialize Socket.IO connection
+        // Initialize Socket.IO connection with optimized settings
         function connectSocket() {
             connectionStatus.textContent = 'Connecting...';
             
-            // Connect to the server
+            // Connect to the server with optimized settings
             socket = io.connect(window.location.origin, {
-                transports: ['websocket'],
-                reconnection: true
+                transports: ['websocket'], // Use WebSocket only for better performance
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000,
+                timeout: 20000,
+                forceNew: true
             });
             
             socket.on('connect', function() {
@@ -190,9 +233,9 @@
                 // Update feedback
                 feedbackElement.textContent = data.feedback || '';
                 
-                // Play audio if available (requires a separate implementation)
+                // Play audio if available
                 if (data.audio_key) {
-                    // Could implement audio playback here
+                    // Play audio feedback - could be implemented
                     console.log('Audio feedback:', data.audio_key);
                 }
             });
@@ -205,39 +248,51 @@
             socket.on('disconnect', function() {
                 connectionStatus.textContent = 'Disconnected from server';
                 console.log('Disconnected from server');
+                stopSendingFrames();
             });
         }
 
-        // Send video frames to the server
-        function startSendingFrames() {
-            if (!localStream || !sessionId) return;
+        // Function to throttle frame sending based on frameRate
+        function processVideoFrame(timestamp) {
+            if (!streamActive) return;
             
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            const videoTrack = localStream.getVideoTracks()[0];
+            // Calculate time since last frame
+            const elapsed = timestamp - lastFrameTime;
             
-            // Create a video element to capture frames
+            // If enough time has passed, send a frame
+            if (elapsed >= frameInterval) {
+                lastFrameTime = timestamp;
+                sendVideoFrame();
+                frameCount++;
+                updateFPS();
+            }
+            
+            // Request next frame
+            requestAnimationId = requestAnimationFrame(processVideoFrame);
+        }
+
+        // Send video frame to the server
+        function sendVideoFrame() {
+            if (!localStream || !sessionId || !socket || socket.disconnected) return;
+            
             const videoCapture = document.createElement('video');
             videoCapture.srcObject = localStream;
             videoCapture.autoplay = true;
-            videoCapture.play();
             
-            // Set canvas dimensions
-            videoCapture.addEventListener('loadedmetadata', () => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Set canvas size based on video dimensions
+            if (videoCapture.videoWidth) {
                 canvas.width = videoCapture.videoWidth;
                 canvas.height = videoCapture.videoHeight;
-            });
-            
-            // Send frames periodically
-            setInterval(() => {
-                if (!socket || !sessionId || socket.disconnected) return;
                 
                 // Draw video frame to canvas
                 ctx.drawImage(videoCapture, 0, 0, canvas.width, canvas.height);
                 
-                // Convert to base64 and send to server
+                // Convert to base64 with quality setting
                 try {
-                    const base64Image = canvas.toDataURL('image/jpeg', 0.7);
+                    const base64Image = canvas.toDataURL('image/jpeg', compressionQuality);
                     
                     socket.emit('frame', {
                         session_id: sessionId,
@@ -246,7 +301,43 @@
                 } catch (err) {
                     console.error('Error sending frame:', err);
                 }
-            }, 100); // 10 frames per second
+            }
+        }
+
+        // Start sending frames using requestAnimationFrame
+        function startSendingFrames() {
+            if (!localStream || !sessionId) return;
+            
+            // Create a persistent video element for capturing
+            const videoCapture = document.createElement('video');
+            videoCapture.srcObject = localStream;
+            videoCapture.autoplay = true;
+            videoCapture.play();
+            
+            // Set up canvas
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Wait for video to be ready
+            videoCapture.addEventListener('loadedmetadata', () => {
+                canvas.width = videoCapture.videoWidth;
+                canvas.height = videoCapture.videoHeight;
+                
+                // Start the frame loop
+                streamActive = true;
+                lastFpsTime = performance.now();
+                lastFrameTime = performance.now();
+                requestAnimationId = requestAnimationFrame(processVideoFrame);
+            });
+        }
+
+        // Stop sending frames
+        function stopSendingFrames() {
+            streamActive = false;
+            if (requestAnimationId) {
+                cancelAnimationFrame(requestAnimationId);
+                requestAnimationId = null;
+            }
         }
 
         // Select exercise and start streaming

@@ -5,6 +5,10 @@ import os
 import pygame
 from utils import calculate_angle, mp_pose, pose
 
+# Global settings for MediaPipe optimization
+MEDIAPIPE_MIN_DETECTION_CONFIDENCE = 0.5
+MEDIAPIPE_MIN_TRACKING_CONFIDENCE = 0.5
+
 def process_frame(frame, left_counter, right_counter, left_state, right_state, 
                  current_audio_key, current_feedback, last_feedback_time, sound_objects):
     """
@@ -25,12 +29,22 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
         processed_frame: The frame with overlays
         results: Dictionary with updated counters and state
     """
+    # Resize for faster processing if needed
+    height, width = frame.shape[:2]
+    if width > 640:
+        frame = cv2.resize(frame, (640, int(height * 640 / width)))
+    
     # Process the image
     image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Set static image flag for better performance
+    image.flags.writeable = False
     results = pose.process(image)
+    image.flags.writeable = True
+    
+    # Convert back to BGR and resize for display
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    image = cv2.resize(frame, (320, 240))  # Lower resolution
-
+    
     # Variables for tracking violations
     arm_violated = {'left': False, 'right': False}
     violation_types = {'sagittal': False, 'shoulder': False, 'elbow': False}
@@ -92,6 +106,7 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
             2
         )
 
+        # Process each arm
         for side, joints in arm_sides.items():
             # Get coordinates for each side
             shoulder = [
@@ -115,87 +130,81 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
             elbow_angle = calculate_angle(shoulder, elbow, wrist)
             shoulder_angle = calculate_angle(hip, shoulder, elbow)
 
-            # Draw connections for the arm
-            arm_connections = [
-                (joints['shoulder'], joints['elbow']),
-                (joints['elbow'], joints['wrist'])
-            ]
-            torso_connections = [
-                (joints['hip'], joints['shoulder'])
-            ]
-
-            joint_positions = {
-                'Shoulder': [shoulder[0] * image.shape[1], shoulder[1] * image.shape[0]],
-                'Elbow': [elbow[0] * image.shape[1], elbow[1] * image.shape[0]],
-                'Wrist': [wrist[0] * image.shape[1], wrist[1] * image.shape[0]],
-                'Hip': [hip[0] * image.shape[1], hip[1] * image.shape[0]]
-            }
-
-            # Draw arm connections
-            for connection in arm_connections:
-                start_idx = connection[0].value
-                end_idx = connection[1].value
-
-                start_point = landmarks[start_idx]
-                end_point = landmarks[end_idx]
-
-                start_coords = (int(start_point.x * image.shape[1]), int(start_point.y * image.shape[0]))
-                end_coords = (int(end_point.x * image.shape[1]), int(end_point.y * image.shape[0]))
-
-                cv2.line(image, start_coords, end_coords, (0,255,0), 2)
-
-            # Draw torso connections
-            for connection in torso_connections:
-                start_idx = connection[0].value
-                end_idx = connection[1].value
-
-                start_point = landmarks[start_idx]
-                end_point = landmarks[end_idx]
-
-                start_coords = (int(start_point.x * image.shape[1]), int(start_point.y * image.shape[0]))
-                end_coords = (int(end_point.x * image.shape[1]), int(end_point.y * image.shape[0]))
-
-                cv2.line(image, start_coords, end_coords, (0,255,0), 2)  # Different color for torso
-
-            # Draw joints
-            for joint, position in joint_positions.items():
-                cv2.circle(image, (int(position[0]), int(position[1])), 7, (0, 0, 255), -1)
-
-            # Display angles with color coding based on correct form
-            elbow_color = (255, 255, 255)  # Default white
-            shoulder_color = (255, 255, 255)  # Default white
+            # Draw arm connections - simplified for performance
+            # Just draw key lines instead of all connections
+            cv2.line(
+                image,
+                (int(shoulder[0] * image.shape[1]), int(shoulder[1] * image.shape[0])),
+                (int(elbow[0] * image.shape[1]), int(elbow[1] * image.shape[0])),
+                (0, 255, 0), 
+                2
+            )
+            cv2.line(
+                image,
+                (int(elbow[0] * image.shape[1]), int(elbow[1] * image.shape[0])),
+                (int(wrist[0] * image.shape[1]), int(wrist[1] * image.shape[0])),
+                (0, 255, 0), 
+                2
+            )
+            cv2.line(
+                image,
+                (int(shoulder[0] * image.shape[1]), int(shoulder[1] * image.shape[0])),
+                (int(hip[0] * image.shape[1]), int(hip[1] * image.shape[0])),
+                (0, 255, 0),
+                2
+            )
             
-            # Check if the angles are outside the desired range
+            # Draw only important joints
+            cv2.circle(
+                image, 
+                (int(shoulder[0] * image.shape[1]), int(shoulder[1] * image.shape[0])), 
+                5, (0, 0, 255), -1
+            )
+            cv2.circle(
+                image, 
+                (int(elbow[0] * image.shape[1]), int(elbow[1] * image.shape[0])), 
+                5, (0, 0, 255), -1
+            )
+            cv2.circle(
+                image, 
+                (int(wrist[0] * image.shape[1]), int(wrist[1] * image.shape[0])), 
+                5, (0, 0, 255), -1
+            )
+
+            # Check form and angles
+            # Define angle thresholds
             elbow_max = 180
             shoulder_max = 30
             sagittal_angle_threshold = 90
             shoulder_max_back = 25  # Maximum angle for shoulder extension backward
-            elbow_min_back = 0  
+            elbow_min_back = 0
 
+            # Display only critical angles with basic formatting
+            # Use a simple text rather than fancy formatting for better performance
+            elbow_color = (255, 255, 255)  # Default white
+            shoulder_color = (255, 255, 255)  # Default white
+            
             # Change color if angle is in violation
             if elbow_angle > elbow_max:
                 elbow_color = (0, 0, 255)  # Red for violation
+                arm_violated[side] = True
+                violation_types['elbow'] = True
             
             if shoulder_angle > shoulder_max or shoulder_angle > sagittal_angle_threshold:
                 shoulder_color = (0, 0, 255)  # Red for violation
-            
-            # Check for specific violations and track them
-            if elbow_angle > elbow_max:
-                arm_violated[side] = True
-                violation_types['elbow'] = True
-            if shoulder_angle >= shoulder_max:
                 arm_violated[side] = True
                 violation_types['shoulder'] = True
+                if shoulder_angle > sagittal_angle_threshold:
+                    violation_types['sagittal'] = True
+            
             if elbow_angle < elbow_min_back or shoulder_angle > shoulder_max_back:
                 arm_violated[side] = True
-            if shoulder_angle > sagittal_angle_threshold:
-                arm_violated[side] = True
-                violation_types['sagittal'] = True
             
+            # Simplified text display
             cv2.putText(
                 image,
-                f' {int(elbow_angle)}',
-                tuple(np.multiply(elbow, [image.shape[1], image.shape[0]]).astype(int)),
+                f'{int(elbow_angle)}',
+                (int(elbow[0] * image.shape[1]), int(elbow[1] * image.shape[0])),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 elbow_color,
@@ -205,8 +214,8 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
 
             cv2.putText(
                 image,
-                f' {int(shoulder_angle)}',
-                tuple(np.multiply(shoulder, [image.shape[1], image.shape[0]]).astype(int)),
+                f'{int(shoulder_angle)}',
+                (int(shoulder[0] * image.shape[1]), int(shoulder[1] * image.shape[0])),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 shoulder_color,
@@ -214,22 +223,20 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
                 cv2.LINE_AA
             )
 
-            # Count repetitions when proper form is maintained
-            if not arm_violated['left'] and not arm_violated['right']:
+            # Rep counting logic
+            if not arm_violated[side]:
                 if side == 'left':
                     if elbow_angle > 160:
                         left_state = 'down'
                     if elbow_angle < 30 and left_state == 'down':
                         left_state = 'up'
                         left_counter += 1
-                        print(f'Left Counter: {left_counter}')
-                if side == 'right':
+                elif side == 'right':
                     if elbow_angle > 160:
                         right_state = 'down'
                     if elbow_angle < 30 and right_state == 'down':
                         right_state = 'up'
                         right_counter += 1
-                        print(f'Right Counter: {right_counter}')
 
         # Handle audio feedback based on form violations
         current_time = time.time()
@@ -275,9 +282,8 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
                     new_audio_key = "right_elbow_straight"
                     feedback_message = "Bend your right elbow more"
             
-            # If we have a message to play and it's either a new message or enough time has passed
+            # If we have a message to play and enough time has passed
             if new_audio_key and (new_audio_key != current_audio_key or current_time - last_feedback_time > feedback_cooldown):
-                # For server we just update state, the client is responsible for playing the sound
                 current_audio_key = new_audio_key
                 current_feedback = feedback_message
                 last_feedback_time = current_time
@@ -286,29 +292,46 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
             if current_audio_key is not None:
                 current_audio_key = None
                 current_feedback = ""
-
-        # Draw counters on the image
-        cv2.putText(image, f'Left Counter: {left_counter}', (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(image, f'Right Counter: {right_counter}', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+                
+        # Draw counters on the image - simplified text display
+        cv2.putText(
+            image, 
+            f'L: {left_counter}  R: {right_counter}', 
+            (10, 30), 
+            cv2.FONT_HERSHEY_SIMPLEX, 
+            0.7, 
+            (255, 0, 0), 
+            2, 
+            cv2.LINE_AA
+        )
         
-        # Display current feedback message if active
+        # Display feedback in a more efficient way
         if current_feedback:
-            # Add centered text with background for better visibility
-            text_size = cv2.getTextSize(current_feedback, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            # Simplified feedback display
+            text_size = cv2.getTextSize(current_feedback, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
             text_x = (image.shape[1] - text_size[0]) // 2
-            text_y = image.shape[0] - 50  # Position at bottom of screen
+            text_y = image.shape[0] - 20
             
-            # Draw semi-transparent background for text
-            overlay = image.copy()
-            cv2.rectangle(overlay, 
-                         (text_x - 10, text_y - text_size[1] - 10),
-                         (text_x + text_size[0] + 10, text_y + 10),
-                         (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.7, image, 0.3, 0, image)
+            # Black background rectangle for text visibility
+            cv2.rectangle(
+                image,
+                (text_x - 5, text_y - 20),
+                (text_x + text_size[0] + 5, text_y + 5),
+                (0, 0, 0),
+                -1
+            )
             
             # Draw text
-            cv2.putText(image, current_feedback, (text_x, text_y),
-                      cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.putText(
+                image,
+                current_feedback,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA
+            )
 
     # Return the processed frame and updated state
     return image, {
@@ -321,7 +344,7 @@ def process_frame(frame, left_counter, right_counter, left_state, right_state,
         'last_feedback_time': last_feedback_time
     }
 
-# Keep the original function for backwards compatibility
+# Keep the original function for backwards compatibility but optimize it
 def hummer(sound):
     """
     Track bicep curl exercise (hammer curl)
@@ -337,41 +360,36 @@ def hummer(sound):
         pygame.mixer.init()
     
     # Variables for tracking
-    left_counter = 0  # Counter for left arm
-    right_counter = 0  # Counter for right arm
-    left_state = None  # State for left arm
-    right_state = None  # State for right arm
+    left_counter = 0
+    right_counter = 0
+    left_state = None
+    right_state = None
     current_audio_key = None
     current_feedback = ""
     last_feedback_time = 0
     
     cap = cv2.VideoCapture(0)
-
+    
+    # Optimize camera settings if possible
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    # Create dummy sound objects for compatibility
+    sound_objects = {}
+    for key in ["left_arm_forward", "right_arm_forward", "both_arms_forward", 
+                "left_shoulder_high", "right_shoulder_high", "both_shoulders_high",
+                "left_elbow_straight", "right_elbow_straight", "both_elbows_straight"]:
+        sound_objects[key] = sound
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
+            
         frame = cv2.flip(frame, 1)
         
-        # Pre-defined audio feedback messages (minimal for compatibility)
-        audio_messages = {
-            "left_arm_forward": "Keep your left arm closer to your body",
-            "right_arm_forward": "Keep your right arm closer to your body",
-            "both_arms_forward": "Keep both arms closer to your body",
-            "left_shoulder_high": "Lower your left shoulder",
-            "right_shoulder_high": "Lower your right shoulder",
-            "both_shoulders_high": "Lower both shoulders",
-            "left_elbow_straight": "Bend your left elbow more",
-            "right_elbow_straight": "Bend your right elbow more",
-            "both_elbows_straight": "Bend both elbows more"
-        }
-        
-        # Process the frame using our new function
-        # Create dummy sound objects for compatibility
-        sound_objects = {}
-        for key in audio_messages.keys():
-            sound_objects[key] = sound  # Use the same sound for all keys
-            
+        # Process the frame using our optimized function
         processed_frame, results = process_frame(
             frame, 
             left_counter, 
@@ -398,7 +416,7 @@ def hummer(sound):
             sound.play()
         
         # Convert the image to JPEG format for streaming
-        ret, buffer = cv2.imencode('.jpg', processed_frame)
+        ret, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         frame = buffer.tobytes()
 
         # Yield the frame to the Flask response

@@ -1,23 +1,51 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebSocket Frame Test</title>
+    <title>WebSocket Frame Test - Optimized</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.4.1/socket.io.min.js"></script>
     <style>
         body { font-family: Arial; padding: 20px; }
         .container { display: flex; gap: 20px; }
         .panel { border: 1px solid #ddd; padding: 10px; width: 320px; }
-        button { padding: 10px; margin: 5px; }
+        .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+        button { padding: 10px; margin: 5px; cursor: pointer; }
         #logContainer { height: 200px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-top: 20px; }
+        #fpsDisplay { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.6); color: white; padding: 5px 10px; border-radius: 3px; font-weight: bold; }
+        .slider-container { margin: 10px 0; }
+        label { display: inline-block; width: 150px; }
+        select, input[type="range"] { width: 200px; }
     </style>
 </head>
 <body>
-    <h1>WebSocket Frame Test</h1>
-    <button id="startCamera">Start Camera</button>
-    <button id="connect">Connect to Server</button>
-    <button id="sendFrame">Send Single Frame</button>
-    <button id="startFrames">Start Sending Frames</button>
-    <button id="stopFrames">Stop Frames</button>
+    <h1>WebSocket Frame Test - Optimized</h1>
+    
+    <div class="controls">
+        <button id="startCamera">Start Camera</button>
+        <button id="connect">Connect to Server</button>
+        <button id="startFrames">Start Streaming</button>
+        <button id="stopFrames">Stop Streaming</button>
+    </div>
+    
+    <div class="slider-container">
+        <label for="frameRate">Frame Rate:</label>
+        <input type="range" id="frameRate" min="1" max="60" value="30" />
+        <span id="frameRateValue">30 FPS</span>
+    </div>
+    
+    <div class="slider-container">
+        <label for="quality">Image Quality:</label>
+        <input type="range" id="quality" min="1" max="10" value="7" />
+        <span id="qualityValue">70%</span>
+    </div>
+    
+    <div class="slider-container">
+        <label for="resolution">Resolution:</label>
+        <select id="resolution">
+            <option value="320x240">320x240</option>
+            <option value="640x480" selected>640x480</option>
+            <option value="1280x720">1280x720</option>
+        </select>
+    </div>
 
     <div class="container">
         <div class="panel">
@@ -27,6 +55,7 @@
         <div class="panel">
             <h3>Server Response</h3>
             <img id="responseImage" width="320" height="240" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==">
+            <div id="fpsDisplay">0 FPS</div>
         </div>
     </div>
 
@@ -35,6 +64,8 @@
         <p>Left Counter: <span id="leftCounter">0</span></p>
         <p>Right Counter: <span id="rightCounter">0</span></p>
         <p>Feedback: <span id="feedback"></span></p>
+        <p>Latency: <span id="latency">0 ms</span></p>
+        <p>Frames Sent: <span id="framesSent">0</span> / Frames Received: <span id="framesReceived">0</span></p>
     </div>
 
     <div id="logContainer">
@@ -47,7 +78,24 @@
         let socket;
         let sessionId;
         let stream;
-        let frameInterval;
+        let requestAnimationId;
+        let lastFrameTime = 0;
+        let streamActive = false;
+        
+        // Performance metrics
+        let framesSent = 0;
+        let framesReceived = 0;
+        let lastFrameSentTime = 0;
+        let lastLatencyUpdate = 0;
+        let latencyValues = [];
+        let frameCount = 0;
+        let lastFpsTime = 0;
+        
+        // Configuration (tied to sliders)
+        let frameRate = 30;
+        let frameInterval = 1000 / frameRate;
+        let imageQuality = 0.7;
+        let resolution = { width: 640, height: 480 };
 
         // DOM elements
         const videoElement = document.getElementById('videoElement');
@@ -57,6 +105,17 @@
         const rightCounterElement = document.getElementById('rightCounter');
         const feedbackElement = document.getElementById('feedback');
         const logsElement = document.getElementById('logs');
+        const latencyElement = document.getElementById('latency');
+        const framesSentElement = document.getElementById('framesSent');
+        const framesReceivedElement = document.getElementById('framesReceived');
+        const fpsDisplayElement = document.getElementById('fpsDisplay');
+        
+        // Slider elements and their value displays
+        const frameRateSlider = document.getElementById('frameRate');
+        const frameRateValue = document.getElementById('frameRateValue');
+        const qualitySlider = document.getElementById('quality');
+        const qualityValue = document.getElementById('qualityValue');
+        const resolutionSelect = document.getElementById('resolution');
 
         // Add log entry with timestamp
         function log(message) {
@@ -66,12 +125,70 @@
             logsElement.appendChild(logEntry);
             logsElement.scrollTop = logsElement.scrollHeight;
         }
+        
+        // Update FPS counter
+        function updateFPS() {
+            const now = performance.now();
+            const elapsed = now - lastFpsTime;
+            
+            if (elapsed >= 1000) {
+                const fps = Math.round((frameCount * 1000) / elapsed);
+                fpsDisplayElement.textContent = `${fps} FPS`;
+                frameCount = 0;
+                lastFpsTime = now;
+            }
+        }
+        
+        // Update latency display
+        function updateLatency() {
+            if (latencyValues.length > 0) {
+                // Calculate average latency over the last 10 values
+                const avgLatency = latencyValues.reduce((a, b) => a + b, 0) / latencyValues.length;
+                latencyElement.textContent = `${Math.round(avgLatency)} ms`;
+                
+                // Reset for next calculation
+                if (latencyValues.length > 10) {
+                    latencyValues = [];
+                }
+            }
+        }
+
+        // Configuration change handlers
+        frameRateSlider.addEventListener('input', () => {
+            frameRate = parseInt(frameRateSlider.value);
+            frameInterval = 1000 / frameRate;
+            frameRateValue.textContent = `${frameRate} FPS`;
+        });
+        
+        qualitySlider.addEventListener('input', () => {
+            imageQuality = parseInt(qualitySlider.value) / 10;
+            qualityValue.textContent = `${imageQuality * 100}%`;
+        });
+        
+        resolutionSelect.addEventListener('change', () => {
+            const [width, height] = resolutionSelect.value.split('x').map(Number);
+            resolution = { width, height };
+            log(`Resolution changed to ${width}x${height}`);
+        });
 
         // Start camera
         document.getElementById('startCamera').addEventListener('click', async () => {
             try {
-                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                const [width, height] = resolutionSelect.value.split('x').map(Number);
+                resolution = { width, height };
+                
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: resolution.width },
+                        height: { ideal: resolution.height },
+                        frameRate: { ideal: frameRate }
+                    } 
+                });
+                
                 videoElement.srcObject = stream;
+                videoElement.width = resolution.width / 2;
+                videoElement.height = resolution.height / 2;
+                
                 log('Camera started');
                 statusElement.textContent = 'Camera started';
             } catch (error) {
@@ -87,7 +204,10 @@
             
             socket = io(serverUrl, {
                 transports: ['websocket'],
-                reconnection: true
+                reconnection: true,
+                reconnectionAttempts: 5,
+                reconnectionDelay: 1000,
+                timeout: 20000
             });
             
             socket.on('connect', () => {
@@ -103,11 +223,30 @@
             
             socket.on('frame', (data) => {
                 if (data.image) {
+                    // Calculate latency
+                    if (lastFrameSentTime > 0) {
+                        const now = performance.now();
+                        const latency = now - lastFrameSentTime;
+                        latencyValues.push(latency);
+                        
+                        // Update latency display periodically
+                        if (now - lastLatencyUpdate > 500) {
+                            updateLatency();
+                            lastLatencyUpdate = now;
+                        }
+                    }
+                    
+                    // Update UI
                     responseImage.src = data.image;
+                    framesReceived++;
+                    framesReceivedElement.textContent = framesReceived;
                     leftCounterElement.textContent = data.left_counter || 0;
                     rightCounterElement.textContent = data.right_counter || 0;
                     feedbackElement.textContent = data.feedback || '';
-                    log(`Received frame: L:${data.left_counter} R:${data.right_counter}`);
+                    
+                    // Update FPS counter
+                    frameCount++;
+                    updateFPS();
                 }
             });
             
@@ -119,71 +258,101 @@
             socket.on('disconnect', () => {
                 log('Disconnected from server');
                 statusElement.textContent = 'Disconnected';
-                if (frameInterval) {
-                    clearInterval(frameInterval);
-                    frameInterval = null;
-                }
+                stopSendingFrames();
             });
-        });
-
-        // Send a single frame
-        document.getElementById('sendFrame').addEventListener('click', () => {
-            if (!socket || !sessionId || !stream) {
-                log('Cannot send frame: Missing socket, session, or camera');
-                return;
-            }
-            
-            sendOneFrame();
         });
 
         // Start sending frames at regular intervals
         document.getElementById('startFrames').addEventListener('click', () => {
             if (!socket || !sessionId || !stream) {
-                log('Cannot start frames: Missing socket, session, or camera');
+                log('Cannot start streaming: Missing socket, session, or camera');
                 return;
             }
             
-            if (frameInterval) {
-                clearInterval(frameInterval);
-            }
-            
             log('Starting to send frames');
-            frameInterval = setInterval(sendOneFrame, 100); // 5fps
+            streamActive = true;
+            lastFpsTime = performance.now();
+            lastFrameTime = performance.now();
+            framesSent = 0;
+            framesReceived = 0;
+            framesSentElement.textContent = '0';
+            framesReceivedElement.textContent = '0';
+            
+            // Select bicep curl exercise by default
+            socket.emit('select_exercise', {
+                exercise: 'bicep_curl',
+                session_id: sessionId
+            });
+            
+            // Start the animation frame loop
+            requestAnimationId = requestAnimationFrame(processVideoFrame);
         });
 
         // Stop sending frames
         document.getElementById('stopFrames').addEventListener('click', () => {
-            if (frameInterval) {
-                clearInterval(frameInterval);
-                frameInterval = null;
-                log('Stopped sending frames');
-            }
+            stopSendingFrames();
+            log('Stopped sending frames');
         });
+        
+        // Function to stop the animation frame loop
+        function stopSendingFrames() {
+            streamActive = false;
+            if (requestAnimationId) {
+                cancelAnimationFrame(requestAnimationId);
+                requestAnimationId = null;
+            }
+        }
+
+        // Function that uses requestAnimationFrame for better timing
+        function processVideoFrame(timestamp) {
+            if (!streamActive) return;
+            
+            // Calculate time since last frame
+            const elapsed = timestamp - lastFrameTime;
+            
+            // If enough time has passed according to frameRate setting
+            if (elapsed >= frameInterval) {
+                lastFrameTime = timestamp;
+                sendVideoFrame();
+            }
+            
+            // Request next frame
+            requestAnimationId = requestAnimationFrame(processVideoFrame);
+        }
 
         // Function to capture and send a single frame
-        function sendOneFrame() {
+        function sendVideoFrame() {
+            if (!socket || !sessionId || !stream || socket.disconnected) return;
+            
+            // Create canvas for frame processing
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
-            canvas.width = videoElement.videoWidth || 320;
-            canvas.height = videoElement.videoHeight || 240;
             
-            // Draw video frame to canvas
+            // Set canvas dimensions to match desired resolution
+            canvas.width = resolution.width;
+            canvas.height = resolution.height;
+            
+            // Draw video to canvas
             ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
             
-            // Convert to base64
+            // Convert to base64 with quality setting
             try {
-                const base64Image = canvas.toDataURL('image/jpeg', 0.7);
+                const base64Image = canvas.toDataURL('image/jpeg', imageQuality);
                 
+                // Record time for latency calculation
+                lastFrameSentTime = performance.now();
+                
+                // Send to server
                 socket.emit('frame', {
                     session_id: sessionId,
                     image: base64Image
                 });
                 
-                log('Frame sent');
+                // Update metrics
+                framesSent++;
+                framesSentElement.textContent = framesSent;
             } catch (error) {
                 log(`Error sending frame: ${error.message}`);
             }
         }
     </script>
-</body>
-</html>

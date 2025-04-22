@@ -1,6 +1,6 @@
 import os
 os.environ['SDL_AUDIODRIVER'] = 'dummy'
-from flask import Flask, Response, request, jsonify
+from flask import Flask, Response, request, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
 import cv2
 import numpy as np
@@ -15,25 +15,36 @@ eventlet.monkey_patch()
 from gtts import gTTS
 import mediapipe as mp
 from utils import calculate_angle, mp_pose, pose
+import asyncio
 from exercises.bicep_curl import process_frame
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Initialize Flask app with CORS support
 from flask_cors import CORS
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 CORS(app)
 
-# Configure Socket.IO with explicit async mode and correct configuration
+# Configure Socket.IO with optimized settings
 socketio = SocketIO(app, 
                    cors_allowed_origins="*", 
                    async_mode='eventlet',
-                   engineio_logger=True,  # Add logging
-                   logger=True)           # Add more logging
+                   engineio_logger=False,  # Reduce logging for performance
+                   logger=False,
+                   ping_interval=25,  # More frequent ping to keep connection alive
+                   ping_timeout=60,
+                   max_http_buffer_size=5 * 1024 * 1024,  # 5MB buffer for larger frames
+                   http_compression=True)  # Enable compression
 
 # Initialize pygame mixer for audio feedback
 pygame.mixer.init()
 
 # User session storage
 user_sessions = {}
+active_sessions = {}  # Track active sessions for monitoring
 
 # Audio feedback messages
 AUDIO_MESSAGES = {
@@ -59,7 +70,7 @@ def setup_audio():
             
             # Create audio file if it doesn't exist
             if not os.path.exists(filepath):
-                print(f"Creating audio file: {filepath}")
+                logger.info(f"Creating audio file: {filepath}")
                 tts = gTTS(text=message, lang='en')
                 tts.save(filepath)
             
@@ -67,7 +78,7 @@ def setup_audio():
             sound_objects[key] = pygame.mixer.Sound(filepath)
         return sound_objects
     except Exception as e:
-        print(f"Error with audio setup: {e}")
+        logger.error(f"Error with audio setup: {e}")
         return {}
 
 # Initialize audio
@@ -85,29 +96,51 @@ class UserSession:
         self.current_feedback = ""
         self.last_feedback_time = 0
         self.feedback_cooldown = 2
+        self.last_active = time.time()
+        self.frame_count = 0
+        self.current_exercise = None
+        self.processing = False  # Flag to prevent concurrent processing
 
 # Add a route for the root path to serve the index.html
 @app.route('/')
 def index():
     return app.send_static_file('index.html')
 
+@app.route('/static/<path:path>')
+def serve_static(path):
+    return send_from_directory('static', path)
+
 # Socket.IO event handlers
 @socketio.on('connect')
 def handle_connect():
     session_id = str(uuid.uuid4())
     user_sessions[session_id] = UserSession(session_id)
+    active_sessions[session_id] = time.time()
     emit('session_id', {'session_id': session_id})
-    print(f"Client connected: {session_id}")
+    logger.info(f"Client connected: {session_id}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    print(f"Client disconnected")
-    # Sessions are cleaned up separately based on session_id
+    # Clean up session when a client disconnects
+    for session_id in list(active_sessions.keys()):
+        if session_id in user_sessions:
+            del user_sessions[session_id]
+        if session_id in active_sessions:
+            del active_sessions[session_id]
+    logger.info(f"Client disconnected, active sessions: {len(active_sessions)}")
 
 @socketio.on('select_exercise')
 def handle_select_exercise(data):
     exercise = data.get('exercise')
-    print(f"Exercise selected: {exercise}")
+    if not exercise:
+        emit('error', {'message': 'No exercise specified'})
+        return
+    
+    # Store exercise in session if session ID present in request
+    if 'session_id' in data and data['session_id'] in user_sessions:
+        user_sessions[data['session_id']].current_exercise = exercise
+    
+    logger.info(f"Exercise selected: {exercise}")
     emit('exercise_selected', {'status': 'success', 'exercise': exercise})
 
 @socketio.on('frame')
@@ -121,9 +154,20 @@ def handle_frame(data):
 
         session = user_sessions[session_id]
         
+        # Update last active timestamp
+        session.last_active = time.time()
+        active_sessions[session_id] = time.time()
+        
+        # Skip if another frame is still being processed (prevents backlog)
+        if session.processing:
+            return
+            
+        session.processing = True
+        
         # Decode the base64 image
         encoded_data = data.get('image')
         if not encoded_data:
+            session.processing = False
             emit('error', {'message': 'No image data received'})
             return
             
@@ -131,64 +175,81 @@ def handle_frame(data):
         if ',' in encoded_data:
             encoded_data = encoded_data.split(',')[1]
             
-        # Decode base64 image
-        nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-        if frame is None:
-            emit('error', {'message': 'Failed to decode image'})
-            return
+        try:
+            # Decode base64 image
+            nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
-        # Process the frame
-        processed_frame, results = process_frame(
-            frame, 
-            session.left_counter, 
-            session.right_counter,
-            session.left_state,
-            session.right_state,
-            session.current_audio_key,
-            session.current_feedback,
-            session.last_feedback_time,
-            sound_objects
-        )
-        
-        # Update session data
-        session.left_counter = results['left_counter']
-        session.right_counter = results['right_counter']
-        session.left_state = results['left_state']
-        session.right_state = results['right_state']
-        session.current_audio_key = results['current_audio_key']
-        session.current_feedback = results['current_feedback']
-        session.last_feedback_time = results['last_feedback_time']
-        
-        # Encode the processed image to send back
-        _, buffer = cv2.imencode('.jpg', processed_frame)
-        encoded_img = base64.b64encode(buffer).decode('utf-8')
-        
-        # Send feedback to client
-        emit('frame', {
-            'image': f'data:image/jpeg;base64,{encoded_img}',
-            'left_counter': session.left_counter,
-            'right_counter': session.right_counter,
-            'feedback': session.current_feedback,
-            'audio_key': session.current_audio_key
-        })
-        
+            if frame is None:
+                session.processing = False
+                emit('error', {'message': 'Failed to decode image'})
+                return
+                
+            # Resize for faster processing
+            frame = cv2.resize(frame, (640, 480))
+            
+            # Process the frame
+            processed_frame, results = process_frame(
+                frame, 
+                session.left_counter, 
+                session.right_counter,
+                session.left_state,
+                session.right_state,
+                session.current_audio_key,
+                session.current_feedback,
+                session.last_feedback_time,
+                sound_objects
+            )
+            
+            # Update session data
+            session.left_counter = results['left_counter']
+            session.right_counter = results['right_counter']
+            session.left_state = results['left_state']
+            session.right_state = results['right_state']
+            session.current_audio_key = results['current_audio_key']
+            session.current_feedback = results['current_feedback']
+            session.last_feedback_time = results['last_feedback_time']
+            session.frame_count += 1
+            
+            # Optimize image encoding
+            _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            encoded_img = base64.b64encode(buffer).decode('utf-8')
+            
+            # Send feedback to client with optimized payload
+            emit('frame', {
+                'image': f'data:image/jpeg;base64,{encoded_img}',
+                'left_counter': session.left_counter,
+                'right_counter': session.right_counter,
+                'feedback': session.current_feedback,
+                'audio_key': session.current_audio_key
+            })
+            
+        except Exception as e:
+            logger.error(f"Error processing frame: {e}", exc_info=True)
+            emit('error', {'message': f'Error processing frame: {str(e)}'})
+        finally:
+            session.processing = False
+            
     except Exception as e:
-        print(f"Error processing frame: {e}")
-        emit('error', {'message': f'Error processing frame: {str(e)}'})
+        logger.error(f"Unhandled error in frame handler: {e}", exc_info=True)
+        emit('error', {'message': f'Server error: {str(e)}'})
+        if 'session' in locals():
+            session.processing = False
 
 # RESTful API endpoint
 @app.route('/api/start_session', methods=['POST'])
 def start_session():
     session_id = str(uuid.uuid4())
     user_sessions[session_id] = UserSession(session_id)
+    active_sessions[session_id] = time.time()
     return jsonify({'session_id': session_id})
 
 @app.route('/api/end_session/<session_id>', methods=['POST'])
 def end_session(session_id):
     if session_id in user_sessions:
         del user_sessions[session_id]
+        if session_id in active_sessions:
+            del active_sessions[session_id]
         return jsonify({'status': 'success'})
     return jsonify({'status': 'error', 'message': 'Session not found'}), 404
 
@@ -202,6 +263,15 @@ def get_audio(audio_key):
             return Response(audio_data, mimetype='audio/mpeg')
     return jsonify({'status': 'error', 'message': 'Audio not found'}), 404
 
+@app.route('/api/status', methods=['GET'])
+def status():
+    """API endpoint for monitoring system status"""
+    return jsonify({
+        'status': 'running',
+        'active_sessions': len(active_sessions),
+        'total_sessions': len(user_sessions)
+    })
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """For Google Cloud health checks"""
@@ -211,10 +281,27 @@ def health_check():
 def cleanup_sessions():
     """Remove inactive sessions periodically"""
     while True:
-        # Sleep for 1 hour before checking
-        time.sleep(3600)
-        # For a more sophisticated implementation, track last activity time
-        # and remove sessions inactive for more than X time
+        try:
+            current_time = time.time()
+            inactive_timeout = 300  # 5 minutes
+            
+            for session_id, last_active in list(active_sessions.items()):
+                if current_time - last_active > inactive_timeout:
+                    # Remove inactive session
+                    if session_id in user_sessions:
+                        del user_sessions[session_id]
+                    if session_id in active_sessions:
+                        del active_sessions[session_id]
+                    logger.info(f"Removed inactive session: {session_id}")
+            
+            # Log current active sessions count
+            if active_sessions:
+                logger.info(f"Active sessions: {len(active_sessions)}")
+        except Exception as e:
+            logger.error(f"Error in session cleanup: {e}")
+        
+        # Sleep for 60 seconds before next cleanup
+        time.sleep(60)
 
 # Start cleanup thread
 cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
@@ -226,6 +313,8 @@ if __name__ == '__main__':
     
     # Get port from environment variable for Cloud compatibility
     port = int(os.environ.get('PORT', 8080))
+    
+    logger.info(f"Starting server on port {port}")
     
     # Run with eventlet
     socketio.run(app, host='0.0.0.0', port=port, debug=False, log_output=True)
