@@ -14,10 +14,10 @@ import eventlet
 eventlet.monkey_patch() 
 from gtts import gTTS
 import mediapipe as mp
-from utils import calculate_angle, mp_pose, pose
-import asyncio
-from exercises.bicep_curl import process_frame
+from utils import calculate_angle, mp_pose, pose, draw_landmarks_lite
 import logging
+import queue
+import functools
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -32,19 +32,27 @@ CORS(app)
 socketio = SocketIO(app, 
                    cors_allowed_origins="*", 
                    async_mode='eventlet',
-                   engineio_logger=False,  # Reduce logging for performance
+                   engineio_logger=False,  # Reduce logging
                    logger=False,
-                   ping_interval=25,  # More frequent ping to keep connection alive
+                   ping_interval=25,
                    ping_timeout=60,
-                   max_http_buffer_size=5 * 1024 * 1024,  # 5MB buffer for larger frames
-                   http_compression=True)  # Enable compression
+                   max_http_buffer_size=5 * 1024 * 1024,  # 5MB buffer
+                   http_compression=True)
 
 # Initialize pygame mixer for audio feedback
 pygame.mixer.init()
 
 # User session storage
 user_sessions = {}
-active_sessions = {}  # Track active sessions for monitoring
+active_sessions = {}
+
+# Processing queues for frame handling
+frame_queues = {}
+MAX_QUEUE_SIZE = 3  # Limit queue size to reduce memory usage
+
+# Processing thread pool
+thread_pool = {}
+MAX_THREADS = 8  # Limit max concurrent processing threads
 
 # Audio feedback messages
 AUDIO_MESSAGES = {
@@ -84,7 +92,7 @@ def setup_audio():
 # Initialize audio
 sound_objects = setup_audio()
 
-# User session class to track exercise state
+# User session class with optimized structure
 class UserSession:
     def __init__(self, session_id):
         self.session_id = session_id
@@ -98,8 +106,139 @@ class UserSession:
         self.feedback_cooldown = 2
         self.last_active = time.time()
         self.frame_count = 0
-        self.current_exercise = None
-        self.processing = False  # Flag to prevent concurrent processing
+        self.current_exercise = "bicep_curl"  # Default
+        self.processing = False
+        self.last_response_time = 0
+        self.skip_processing = 0  # Counter to skip frames
+
+# Process frame in worker thread to avoid blocking
+def process_frame_worker(session_id):
+    """
+    Worker function to process frames for a session
+    """
+    if session_id not in user_sessions or session_id not in frame_queues:
+        return
+        
+    session = user_sessions[session_id]
+    q = frame_queues[session_id]
+    
+    logger.info(f"Starting worker thread for session {session_id}")
+    
+    while True:
+        try:
+            # Get frame data with timeout to allow thread termination
+            try:
+                frame_data = q.get(timeout=0.5)
+            except queue.Empty:
+                # Check if session is still active
+                if session_id not in active_sessions:
+                    logger.info(f"Worker thread for {session_id} terminating due to inactive session")
+                    break
+                continue
+                
+            # Skip this frame if the queue has newer frames waiting
+            if not q.empty() and q.qsize() > 1:
+                q.task_done()
+                continue
+            
+            # Process the frame
+            try:
+                # Extract image data
+                encoded_data = frame_data.get('image')
+                if not encoded_data:
+                    q.task_done()
+                    continue
+                    
+                # Strip the prefix if present
+                if ',' in encoded_data:
+                    encoded_data = encoded_data.split(',')[1]
+                    
+                # Decode image with reduced precision
+                nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+                if frame is None:
+                    q.task_done()
+                    continue
+                
+                # Skip processing if we're falling behind (skip every other frame)
+                if session.skip_processing > 0:
+                    session.skip_processing -= 1
+                    # Just return the original frame with minimal processing
+                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                    encoded_img = base64.b64encode(buffer).decode('utf-8')
+                    
+                    # Send back to client
+                    socketio.emit('frame', {
+                        'image': f'data:image/jpeg;base64,{encoded_img}',
+                        'left_counter': session.left_counter,
+                        'right_counter': session.right_counter,
+                        'feedback': session.current_feedback,
+                        'audio_key': session.current_audio_key
+                    }, room=session_id)
+                    
+                    q.task_done()
+                    continue
+                
+                # Process frame with current exercise function
+                from exercises.bicep_curl import process_frame
+                
+                # Resize for faster processing
+                frame = cv2.resize(frame, (320, 240))  # Very low resolution for processing
+                
+                # Process the frame with optimized function
+                processed_frame, results = process_frame(
+                    frame, 
+                    session.left_counter, 
+                    session.right_counter,
+                    session.left_state,
+                    session.right_state,
+                    session.current_audio_key,
+                    session.current_feedback,
+                    session.last_feedback_time,
+                    sound_objects
+                )
+                
+                # Update session data
+                session.left_counter = results['left_counter']
+                session.right_counter = results['right_counter']
+                session.left_state = results['left_state']
+                session.right_state = results['right_state']
+                session.current_audio_key = results['current_audio_key']
+                session.current_feedback = results['current_feedback']
+                session.last_feedback_time = results['last_feedback_time']
+                session.frame_count += 1
+                
+                # Calculate if we need to skip frames (if processing takes too long)
+                current_time = time.time()
+                frame_processing_time = current_time - session.last_response_time
+                
+                # If processing took longer than 100ms, start skipping frames
+                if frame_processing_time > 0.1:  
+                    session.skip_processing = min(5, int(frame_processing_time * 10))  # Skip more frames for longer processing
+                    
+                session.last_response_time = current_time
+                
+                # Optimize image encoding
+                _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                encoded_img = base64.b64encode(buffer).decode('utf-8')
+                
+                # Send feedback to client
+                socketio.emit('frame', {
+                    'image': f'data:image/jpeg;base64,{encoded_img}',
+                    'left_counter': session.left_counter,
+                    'right_counter': session.right_counter,
+                    'feedback': session.current_feedback,
+                    'audio_key': session.current_audio_key
+                }, room=session_id)
+                
+            except Exception as e:
+                logger.error(f"Error processing frame: {e}", exc_info=True)
+            finally:
+                q.task_done()
+                
+        except Exception as e:
+            logger.error(f"Unhandled error in worker thread: {e}", exc_info=True)
 
 # Add a route for the root path to serve the index.html
 @app.route('/')
@@ -113,21 +252,43 @@ def serve_static(path):
 # Socket.IO event handlers
 @socketio.on('connect')
 def handle_connect():
-    session_id = str(uuid.uuid4())
+    session_id = request.sid  # Use Socket.IO's session ID
     user_sessions[session_id] = UserSession(session_id)
     active_sessions[session_id] = time.time()
+    
+    # Create a queue for this session
+    frame_queues[session_id] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+    
+    # Start a worker thread for this session
+    thread = threading.Thread(target=process_frame_worker, args=(session_id,), daemon=True)
+    thread_pool[session_id] = thread
+    thread.start()
+    
     emit('session_id', {'session_id': session_id})
     logger.info(f"Client connected: {session_id}")
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    # Clean up session when a client disconnects
-    for session_id in list(active_sessions.keys()):
-        if session_id in user_sessions:
-            del user_sessions[session_id]
-        if session_id in active_sessions:
-            del active_sessions[session_id]
-    logger.info(f"Client disconnected, active sessions: {len(active_sessions)}")
+    session_id = request.sid
+    logger.info(f"Client disconnected: {session_id}")
+    
+    # Clean up resources
+    if session_id in user_sessions:
+        del user_sessions[session_id]
+    if session_id in active_sessions:
+        del active_sessions[session_id]
+    if session_id in frame_queues:
+        # Clear the queue
+        try:
+            q = frame_queues[session_id]
+            while not q.empty():
+                q.get_nowait()
+                q.task_done()
+        except:
+            pass
+        del frame_queues[session_id]
+    
+    # Thread will exit on its own when it times out waiting for queue
 
 @socketio.on('select_exercise')
 def handle_select_exercise(data):
@@ -136,9 +297,11 @@ def handle_select_exercise(data):
         emit('error', {'message': 'No exercise specified'})
         return
     
-    # Store exercise in session if session ID present in request
-    if 'session_id' in data and data['session_id'] in user_sessions:
-        user_sessions[data['session_id']].current_exercise = exercise
+    session_id = request.sid
+    
+    # Store exercise in session
+    if session_id in user_sessions:
+        user_sessions[session_id].current_exercise = exercise
     
     logger.info(f"Exercise selected: {exercise}")
     emit('exercise_selected', {'status': 'success', 'exercise': exercise})
@@ -147,8 +310,8 @@ def handle_select_exercise(data):
 def handle_frame(data):
     try:
         # Get the session information
-        session_id = data.get('session_id')
-        if not session_id or session_id not in user_sessions:
+        session_id = request.sid
+        if session_id not in user_sessions:
             emit('error', {'message': 'Invalid session ID'})
             return
 
@@ -158,83 +321,22 @@ def handle_frame(data):
         session.last_active = time.time()
         active_sessions[session_id] = time.time()
         
-        # Skip if another frame is still being processed (prevents backlog)
-        if session.processing:
-            return
-            
-        session.processing = True
-        
-        # Decode the base64 image
-        encoded_data = data.get('image')
-        if not encoded_data:
-            session.processing = False
-            emit('error', {'message': 'No image data received'})
-            return
-            
-        # Strip the prefix (e.g., 'data:image/jpeg;base64,')
-        if ',' in encoded_data:
-            encoded_data = encoded_data.split(',')[1]
-            
-        try:
-            # Decode base64 image
-            nparr = np.frombuffer(base64.b64decode(encoded_data), np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
-            if frame is None:
-                session.processing = False
-                emit('error', {'message': 'Failed to decode image'})
+        # Skip if the processing queue is full (backpressure)
+        if session_id in frame_queues:
+            q = frame_queues[session_id]
+            if q.full():
                 return
                 
-            # Resize for faster processing
-            frame = cv2.resize(frame, (640, 480))
-            
-            # Process the frame
-            processed_frame, results = process_frame(
-                frame, 
-                session.left_counter, 
-                session.right_counter,
-                session.left_state,
-                session.right_state,
-                session.current_audio_key,
-                session.current_feedback,
-                session.last_feedback_time,
-                sound_objects
-            )
-            
-            # Update session data
-            session.left_counter = results['left_counter']
-            session.right_counter = results['right_counter']
-            session.left_state = results['left_state']
-            session.right_state = results['right_state']
-            session.current_audio_key = results['current_audio_key']
-            session.current_feedback = results['current_feedback']
-            session.last_feedback_time = results['last_feedback_time']
-            session.frame_count += 1
-            
-            # Optimize image encoding
-            _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            encoded_img = base64.b64encode(buffer).decode('utf-8')
-            
-            # Send feedback to client with optimized payload
-            emit('frame', {
-                'image': f'data:image/jpeg;base64,{encoded_img}',
-                'left_counter': session.left_counter,
-                'right_counter': session.right_counter,
-                'feedback': session.current_feedback,
-                'audio_key': session.current_audio_key
-            })
-            
-        except Exception as e:
-            logger.error(f"Error processing frame: {e}", exc_info=True)
-            emit('error', {'message': f'Error processing frame: {str(e)}'})
-        finally:
-            session.processing = False
-            
+            # Add the frame to the processing queue
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                # Queue is full, drop this frame
+                pass
+        
     except Exception as e:
-        logger.error(f"Unhandled error in frame handler: {e}", exc_info=True)
+        logger.error(f"Error in frame handler: {e}", exc_info=True)
         emit('error', {'message': f'Server error: {str(e)}'})
-        if 'session' in locals():
-            session.processing = False
 
 # RESTful API endpoint
 @app.route('/api/start_session', methods=['POST'])
@@ -242,6 +344,15 @@ def start_session():
     session_id = str(uuid.uuid4())
     user_sessions[session_id] = UserSession(session_id)
     active_sessions[session_id] = time.time()
+    
+    # Create a queue for this session
+    frame_queues[session_id] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
+    
+    # Start a worker thread for this session
+    thread = threading.Thread(target=process_frame_worker, args=(session_id,), daemon=True)
+    thread_pool[session_id] = thread
+    thread.start()
+    
     return jsonify({'session_id': session_id})
 
 @app.route('/api/end_session/<session_id>', methods=['POST'])
@@ -250,6 +361,8 @@ def end_session(session_id):
         del user_sessions[session_id]
         if session_id in active_sessions:
             del active_sessions[session_id]
+        if session_id in frame_queues:
+            del frame_queues[session_id]
         return jsonify({'status': 'success'})
     return jsonify({'status': 'error', 'message': 'Session not found'}), 404
 
@@ -269,7 +382,8 @@ def status():
     return jsonify({
         'status': 'running',
         'active_sessions': len(active_sessions),
-        'total_sessions': len(user_sessions)
+        'total_sessions': len(user_sessions),
+        'workers': len(thread_pool)
     })
 
 @app.route('/health', methods=['GET'])
@@ -283,7 +397,7 @@ def cleanup_sessions():
     while True:
         try:
             current_time = time.time()
-            inactive_timeout = 300  # 5 minutes
+            inactive_timeout = 60  # 1 minute timeout (more aggressive)
             
             for session_id, last_active in list(active_sessions.items()):
                 if current_time - last_active > inactive_timeout:
@@ -292,6 +406,8 @@ def cleanup_sessions():
                         del user_sessions[session_id]
                     if session_id in active_sessions:
                         del active_sessions[session_id]
+                    if session_id in frame_queues:
+                        del frame_queues[session_id]
                     logger.info(f"Removed inactive session: {session_id}")
             
             # Log current active sessions count
@@ -300,8 +416,8 @@ def cleanup_sessions():
         except Exception as e:
             logger.error(f"Error in session cleanup: {e}")
         
-        # Sleep for 60 seconds before next cleanup
-        time.sleep(60)
+        # Sleep for 30 seconds before next cleanup
+        time.sleep(30)
 
 # Start cleanup thread
 cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)

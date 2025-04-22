@@ -25,13 +25,14 @@
         .video-container {
             text-align: center;
             margin: 20px 0;
-            min-height: 480px;
+            min-height: 360px;
+            position: relative;
         }
         #videoElement {
             max-width: 100%;
             border: 3px solid #444;
             border-radius: 5px;
-            min-height: 480px;
+            min-height: 360px;
             max-height: 480px;
             background: #eee;
         }
@@ -89,12 +90,30 @@
         }
         #fpsDisplay {
             position: absolute;
-            top: 10px;
+            bottom: 10px;
             right: 10px;
             background: rgba(0,0,0,0.5);
             color: white;
             padding: 5px;
             border-radius: 3px;
+            font-size: 12px;
+        }
+        .settings {
+            margin: 15px 0;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+        .setting-row {
+            display: flex;
+            align-items: center;
+            margin: 5px 0;
+        }
+        .setting-row label {
+            flex: 0 0 150px;
+        }
+        .setting-row input, .setting-row select {
+            flex: 0 0 150px;
         }
     </style>
 </head>
@@ -106,6 +125,28 @@
         
         <div class="status" id="connectionStatus">
             Not connected
+        </div>
+
+        <div class="settings">
+            <h3>Performance Settings</h3>
+            <div class="setting-row">
+                <label for="frameRate">Frame Rate:</label>
+                <input type="range" id="frameRate" min="5" max="30" value="10" />
+                <span id="frameRateValue">10 FPS</span>
+            </div>
+            <div class="setting-row">
+                <label for="quality">Image Quality:</label>
+                <input type="range" id="quality" min="1" max="10" value="5" />
+                <span id="qualityValue">50%</span>
+            </div>
+            <div class="setting-row">
+                <label for="resolution">Resolution:</label>
+                <select id="resolution">
+                    <option value="320x240" selected>320x240 (Low)</option>
+                    <option value="480x360">480x360 (Medium)</option>
+                    <option value="640x480">640x480 (High)</option>
+                </select>
+            </div>
         </div>
         
         <div class="controls">
@@ -127,7 +168,7 @@
         
         <div class="video-container">
             <img id="videoElement" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" alt="Exercise Feed">
-            <div id="fpsDisplay">0 FPS</div>
+            <div id="fpsDisplay">0 FPS | Sent: 0 | Received: 0</div>
         </div>
         
         <div id="feedback"></div>
@@ -142,10 +183,18 @@
         let lastFpsTime = 0;
         let requestAnimationId = null;
         let lastFrameTime = 0;
-        let frameRate = 30; // Target frame rate
-        let frameInterval = 1000 / frameRate; // Milliseconds between frames
-        let compressionQuality = 0.6; // Image quality (0.0-1.0)
+        let frameRate = 10; // Default lower frame rate
+        let frameInterval = 1000 / frameRate;
+        let compressionQuality = 0.5; // Lower default image quality
         let streamActive = false;
+        let videoCapture = null;
+        let canvas = null;
+        let ctx = null;
+        let framesSent = 0;
+        let framesReceived = 0;
+        let resolution = { width: 320, height: 240 }; // Lower default resolution
+        let socketQueue = 0; // Track pending socket.io messages
+        let backpressureLimit = 3; // Max pending frames before applying backpressure
         
         const startCameraButton = document.getElementById('startCamera');
         const connectionStatus = document.getElementById('connectionStatus');
@@ -154,15 +203,44 @@
         const leftCounterElement = document.getElementById('leftCounter');
         const rightCounterElement = document.getElementById('rightCounter');
         const fpsDisplay = document.getElementById('fpsDisplay');
+        
+        // UI controls
+        const frameRateSlider = document.getElementById('frameRate');
+        const frameRateValue = document.getElementById('frameRateValue');
+        const qualitySlider = document.getElementById('quality');
+        const qualityValue = document.getElementById('qualityValue');
+        const resolutionSelect = document.getElementById('resolution');
 
-        // FPS Counter
+        // Event listeners for settings
+        frameRateSlider.addEventListener('input', () => {
+            frameRate = parseInt(frameRateSlider.value);
+            frameInterval = 1000 / frameRate;
+            frameRateValue.textContent = `${frameRate} FPS`;
+        });
+        
+        qualitySlider.addEventListener('input', () => {
+            compressionQuality = parseInt(qualitySlider.value) / 10;
+            qualityValue.textContent = `${compressionQuality * 100}%`;
+        });
+        
+        resolutionSelect.addEventListener('change', () => {
+            const [width, height] = resolutionSelect.value.split('x').map(Number);
+            resolution = { width, height };
+            
+            if (canvas) {
+                canvas.width = width;
+                canvas.height = height;
+            }
+        });
+
+        // FPS and performance Counter
         function updateFPS() {
             const now = performance.now();
             const elapsed = now - lastFpsTime;
             
             if (elapsed >= 1000) { // Update every second
                 const fps = Math.round((frameCount * 1000) / elapsed);
-                fpsDisplay.textContent = `${fps} FPS`;
+                fpsDisplay.textContent = `${fps} FPS | Sent: ${framesSent} | Received: ${framesReceived}`;
                 frameCount = 0;
                 lastFpsTime = now;
             }
@@ -171,17 +249,33 @@
         // Start camera and connect to server
         startCameraButton.addEventListener('click', async () => {
             try {
+                // Get resolution from select
+                const [width, height] = resolutionSelect.value.split('x').map(Number);
+                resolution = { width, height };
+                
                 // Start camera with lower resolution for better performance
                 localStream = await navigator.mediaDevices.getUserMedia({ 
                     video: { 
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
-                        frameRate: { ideal: 30 }
+                        width: { ideal: width },
+                        height: { ideal: height },
+                        frameRate: { ideal: frameRate }
                     } 
                 });
                 
                 startCameraButton.disabled = true;
                 startCameraButton.textContent = 'Camera Started';
+                
+                // Create persistent video element for capturing
+                videoCapture = document.createElement('video');
+                videoCapture.srcObject = localStream;
+                videoCapture.autoplay = true;
+                videoCapture.play();
+                
+                // Create persistent canvas for frame processing
+                canvas = document.createElement('canvas');
+                canvas.width = resolution.width;
+                canvas.height = resolution.height;
+                ctx = canvas.getContext('2d', { alpha: false }); // Disable alpha for performance
                 
                 // Initialize Socket.IO connection
                 connectSocket();
@@ -197,7 +291,7 @@
             
             // Connect to the server with optimized settings
             socket = io.connect(window.location.origin, {
-                transports: ['websocket'], // Use WebSocket only for better performance
+                transports: ['websocket'], // Use WebSocket only
                 reconnection: true,
                 reconnectionAttempts: 5,
                 reconnectionDelay: 1000,
@@ -208,6 +302,10 @@
             socket.on('connect', function() {
                 connectionStatus.textContent = 'Connected to server';
                 console.log('Connected to server');
+                
+                // Reset counters
+                framesSent = 0;
+                framesReceived = 0;
                 
                 // Default to bicep curl on connect
                 setTimeout(() => {
@@ -222,8 +320,11 @@
             });
             
             socket.on('frame', function(data) {
+                socketQueue--; // Reduce backpressure counter
+                
                 if (data.image) {
                     videoElement.src = data.image;
+                    framesReceived++;
                 }
                 
                 // Update counters
@@ -233,22 +334,22 @@
                 // Update feedback
                 feedbackElement.textContent = data.feedback || '';
                 
-                // Play audio if available
-                if (data.audio_key) {
-                    // Play audio feedback - could be implemented
-                    console.log('Audio feedback:', data.audio_key);
-                }
+                // Update FPS counter
+                frameCount++;
+                updateFPS();
             });
             
             socket.on('error', function(data) {
                 console.error('Server error:', data.message);
                 connectionStatus.textContent = `Error: ${data.message}`;
+                socketQueue = 0; // Reset queue on error
             });
             
             socket.on('disconnect', function() {
                 connectionStatus.textContent = 'Disconnected from server';
                 console.log('Disconnected from server');
                 stopSendingFrames();
+                socketQueue = 0; // Reset queue on disconnect
             });
         }
 
@@ -262,73 +363,53 @@
             // If enough time has passed, send a frame
             if (elapsed >= frameInterval) {
                 lastFrameTime = timestamp;
-                sendVideoFrame();
-                frameCount++;
-                updateFPS();
+                
+                // Only send if we're not experiencing backpressure
+                if (socketQueue < backpressureLimit) {
+                    sendVideoFrame();
+                }
             }
             
             // Request next frame
             requestAnimationId = requestAnimationFrame(processVideoFrame);
         }
 
-        // Send video frame to the server
+        // Send video frame to the server with optimizations
         function sendVideoFrame() {
-            if (!localStream || !sessionId || !socket || socket.disconnected) return;
+            if (!localStream || !sessionId || !socket || socket.disconnected || !videoCapture || !ctx) return;
             
-            const videoCapture = document.createElement('video');
-            videoCapture.srcObject = localStream;
-            videoCapture.autoplay = true;
-            
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            // Set canvas size based on video dimensions
-            if (videoCapture.videoWidth) {
-                canvas.width = videoCapture.videoWidth;
-                canvas.height = videoCapture.videoHeight;
-                
-                // Draw video frame to canvas
+            try {
+                // Draw video frame to canvas with size optimization
                 ctx.drawImage(videoCapture, 0, 0, canvas.width, canvas.height);
                 
-                // Convert to base64 with quality setting
-                try {
-                    const base64Image = canvas.toDataURL('image/jpeg', compressionQuality);
-                    
-                    socket.emit('frame', {
-                        session_id: sessionId,
-                        image: base64Image
-                    });
-                } catch (err) {
-                    console.error('Error sending frame:', err);
-                }
+                // Convert to base64 with lower quality
+                const base64Image = canvas.toDataURL('image/jpeg', compressionQuality);
+                
+                // Increase backpressure counter
+                socketQueue++;
+                
+                // Send minimal data to server
+                socket.emit('frame', {
+                    session_id: sessionId,
+                    image: base64Image
+                });
+                
+                framesSent++;
+            } catch (err) {
+                console.error('Error sending frame:', err);
+                socketQueue = Math.max(0, socketQueue - 1); // Reduce queue on error
             }
         }
 
         // Start sending frames using requestAnimationFrame
         function startSendingFrames() {
-            if (!localStream || !sessionId) return;
+            if (!localStream || !sessionId || !videoCapture) return;
             
-            // Create a persistent video element for capturing
-            const videoCapture = document.createElement('video');
-            videoCapture.srcObject = localStream;
-            videoCapture.autoplay = true;
-            videoCapture.play();
-            
-            // Set up canvas
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            // Wait for video to be ready
-            videoCapture.addEventListener('loadedmetadata', () => {
-                canvas.width = videoCapture.videoWidth;
-                canvas.height = videoCapture.videoHeight;
-                
-                // Start the frame loop
-                streamActive = true;
-                lastFpsTime = performance.now();
-                lastFrameTime = performance.now();
-                requestAnimationId = requestAnimationFrame(processVideoFrame);
-            });
+            // Start the frame loop
+            streamActive = true;
+            lastFpsTime = performance.now();
+            lastFrameTime = performance.now();
+            requestAnimationId = requestAnimationFrame(processVideoFrame);
         }
 
         // Stop sending frames
@@ -357,7 +438,10 @@
             currentExercise = exercise;
             
             // Request the selected exercise stream
-            socket.emit('select_exercise', {exercise: exercise});
+            socket.emit('select_exercise', {
+                exercise: exercise,
+                session_id: sessionId
+            });
             connectionStatus.textContent = `Selected exercise: ${exercise}`;
         }
     </script>
