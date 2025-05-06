@@ -282,7 +282,16 @@ def handle_frame(data):
         if session_id in frame_queues:
             q = frame_queues[session_id]
             if q.full():
-                return
+                # Calculate how many frames we're behind
+                backlog = q.qsize()
+                
+                # Tell client to slow down if seriously behind
+                if backlog >= MAX_QUEUE_SIZE:
+                    emit('backpressure', {
+                        'backlog': backlog,
+                        'suggestion': 'reduce_framerate'
+                    })
+                    return
                 
             # Add the frame to the processing queue
             try:
@@ -294,7 +303,7 @@ def handle_frame(data):
     except Exception as e:
         logger.error(f"Error in frame handler: {e}", exc_info=True)
         emit('error', {'message': f'Server error: {str(e)}'})
-
+        
 # RESTful API endpoint
 @app.route('/api/start_session', methods=['POST'])
 def start_session():
