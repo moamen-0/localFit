@@ -89,8 +89,8 @@ def setup_audio():
                     # Continue without this audio file
                     continue
             
-            # Only load sound object if file exists and pygame is available
-            if os.path.exists(filepath) and pygame is not None:
+            # Only load sound object if file exists
+            if os.path.exists(filepath):
                 try:
                     sound_objects[key] = pygame.mixer.Sound(filepath)
                 except Exception as sound_error:
@@ -134,9 +134,7 @@ def process_frame_worker(session_id):
     q = frame_queues[session_id]
     
     logger.info(f"Starting worker thread for session {session_id}")
-    
-    while True:
-        try:
+      while True:        try:
             # Get frame data with timeout to allow thread termination
             frame_data = None
             try:
@@ -207,8 +205,7 @@ def process_frame_worker(session_id):
                     'feedback': session.current_feedback,
                     'audio_key': session.current_audio_key
                 }, room=session_id)
-                
-            except Exception as e:
+                  except Exception as e:
                 logger.error(f"Error processing frame: {e}", exc_info=True)
             finally:
                 # Always call task_done() when we got a frame from the queue
