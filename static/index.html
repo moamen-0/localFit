@@ -160,15 +160,14 @@
         </div>
         
         <div class="controls">
-            <button id="bicep_curl" onclick="selectExercise('bicep_curl')">Bicep Curl</button>
-            <button id="front_raise" onclick="selectExercise('front_raise')">Front Raise</button>
-            <button id="squat" onclick="selectExercise('squat')">Squat</button>
-            <button id="triceps" onclick="selectExercise('triceps')">Triceps Extension</button>
-            <button id="shoulder_press" onclick="selectExercise('shoulder_press')">Shoulder Press</button>
-            <button id="plank" onclick="selectExercise('plank')">Plank</button>
-            <button id="side_lateral_raise" onclick="selectExercise('side_lateral_raise')">Lateral Raise</button>
-            <button id="triceps_kickback" onclick="selectExercise('triceps_kickback')">Triceps Kickback</button>
-            <button id="push_ups" onclick="selectExercise('push_ups')">Push Ups</button>
+            <button id="startCamera">Start Camera</button>
+            <button id="bicepCurl">Bicep Curl</button>
+            <button id="frontRaise">Front Raise</button>
+            <button id="sideLateralRaise">Side Lateral Raise</button>
+            <button id="tricepsKickback">Triceps Kickback</button>
+            <button id="squat">Squat</button>
+            <button id="shoulderPress">Shoulder Press</button>
+            <button id="pushUps">Push-ups</button>
         </div>
         
         <div class="counters">
@@ -441,29 +440,33 @@
             }
         }
 
-        // Select exercise and start streaming
+        // Exercise selection buttons
+        const bicepCurlButton = document.getElementById('bicepCurl');
+        const frontRaiseButton = document.getElementById('frontRaise');
+        const sideLateralRaiseButton = document.getElementById('sideLateralRaise');
+        const tricepsKickbackButton = document.getElementById('tricepsKickback');
+        const squatButton = document.getElementById('squat');
+        const shoulderPressButton = document.getElementById('shoulderPress');
+        const pushUpsButton = document.getElementById('pushUps');
+
+        // Function to handle exercise selection
         function selectExercise(exercise) {
-            if (!socket) {
-                console.warn('Socket not connected. Please start the camera first.');
-                return;
+            if (socket) {
+                socket.emit('select_exercise', {
+                    exercise: exercise,
+                    session_id: sessionId
+                });
             }
-            
-            // Clear previous selection
-            if (currentExercise) {
-                document.getElementById(currentExercise).classList.remove('selected');
-            }
-            
-            // Highlight new selection
-            document.getElementById(exercise).classList.add('selected');
-            currentExercise = exercise;
-            
-            // Request the selected exercise stream
-            socket.emit('select_exercise', {
-                exercise: exercise,
-                session_id: sessionId
-            });
-            connectionStatus.textContent = `Selected exercise: ${exercise}`;
         }
+
+        // Add click event listeners for exercise buttons
+        bicepCurlButton.addEventListener('click', () => selectExercise('bicep_curl'));
+        frontRaiseButton.addEventListener('click', () => selectExercise('front_raise'));
+        sideLateralRaiseButton.addEventListener('click', () => selectExercise('side_lateral_raise'));
+        tricepsKickbackButton.addEventListener('click', () => selectExercise('triceps_kickback'));
+        squatButton.addEventListener('click', () => selectExercise('squat'));
+        shoulderPressButton.addEventListener('click', () => selectExercise('shoulder_press'));
+        pushUpsButton.addEventListener('click', () => selectExercise('push_ups'));
     </script>
 </body>
 </html>
