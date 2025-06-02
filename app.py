@@ -23,6 +23,7 @@ from exercises.triceps_kickback import triceps_kickback
 from exercises.squat import squat
 from exercises.shoulder_press import shoulder_press
 from exercises.push_ups import push_ups
+from exercises.bicep_curl import hummer as bicep_curl
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -224,31 +225,60 @@ def process_frame_worker(session_id):
                                 nparr = np.frombuffer(frame_data, np.uint8)
                                 processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                                 break
+                elif session.current_exercise == "push_ups":
+                    # Use the push ups exercise generator
+                    for processed_frame in push_ups(sound_objects):
+                        # Extract the frame from the generator
+                        if isinstance(processed_frame, tuple):
+                            frame_data = processed_frame[0]
+                            if frame_data.startswith(b'--frame'):
+                                # Extract the actual image data
+                                frame_data = frame_data.split(b'\r\n\r\n')[1]
+                                frame_data = frame_data.split(b'\r\n')[0]
+                                nparr = np.frombuffer(frame_data, np.uint8)
+                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                break
+                elif session.current_exercise == "bicep_curl":
+                    # Use the bicep curl exercise generator
+                    for processed_frame in bicep_curl(sound_objects):
+                        # Extract the frame from the generator
+                        if isinstance(processed_frame, tuple):
+                            frame_data = processed_frame[0]
+                            if frame_data.startswith(b'--frame'):
+                                # Extract the actual image data
+                                frame_data = frame_data.split(b'\r\n\r\n')[1]
+                                frame_data = frame_data.split(b'\r\n')[0]
+                                nparr = np.frombuffer(frame_data, np.uint8)
+                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                break
+                elif session.current_exercise == "shoulder_raise":
+                    # Shoulder raise is currently empty, map to side_lateral_raise as a fallback
+                    for processed_frame in side_lateral_raise(sound_objects):
+                        # Extract the frame from the generator
+                        if isinstance(processed_frame, tuple):
+                            frame_data = processed_frame[0]
+                            if frame_data.startswith(b'--frame'):
+                                # Extract the actual image data
+                                frame_data = frame_data.split(b'\r\n\r\n')[1]
+                                frame_data = frame_data.split(b'\r\n')[0]
+                                nparr = np.frombuffer(frame_data, np.uint8)
+                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                break
                 else:
-                    # Use the bicep curl exercise
-                    from exercises.bicep_curl import process_frame
-                    processed_frame, results = process_frame(
-                        frame, 
-                        session.left_counter, 
-                        session.right_counter,
-                        session.left_state,
-                        session.right_state,
-                        session.current_audio_key,
-                        session.current_feedback,
-                        session.last_feedback_time,
-                        sound_objects
-                    )
-                
-                # Update session data for bicep curl
-                if session.current_exercise != "front_raise":
-                    session.left_counter = results['left_counter']
-                    session.right_counter = results['right_counter']
-                    session.left_state = results['left_state']
-                    session.right_state = results['right_state']
-                    session.current_audio_key = results['current_audio_key']
-                    session.current_feedback = results['current_feedback']
-                    session.last_feedback_time = results['last_feedback_time']
-                
+                    # Default fallback to bicep curl
+                    for processed_frame in bicep_curl(sound_objects):
+                        # Extract the frame from the generator
+                        if isinstance(processed_frame, tuple):
+                            frame_data = processed_frame[0]
+                            if frame_data.startswith(b'--frame'):
+                                # Extract the actual image data
+                                frame_data = frame_data.split(b'\r\n\r\n')[1]
+                                frame_data = frame_data.split(b'\r\n')[0]
+                                nparr = np.frombuffer(frame_data, np.uint8)
+                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                break                
+                # Update session data - for generator-based exercises, we don't get results back
+                # Session counters and state would be managed differently if needed
                 session.frame_count += 1
                 
                 # Record response time for metrics
@@ -257,14 +287,13 @@ def process_frame_worker(session_id):
                 # Optimize image encoding while keeping quality reasonable
                 _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 encoded_img = base64.b64encode(buffer).decode('utf-8')
-                
-                # Send feedback to client
+                  # Send feedback to client
                 socketio.emit('frame', {
                     'image': f'data:image/jpeg;base64,{encoded_img}',
-                    'left_counter': session.left_counter,
-                    'right_counter': session.right_counter,
-                    'feedback': session.current_feedback,
-                    'audio_key': session.current_audio_key
+                    'left_counter': getattr(session, 'left_counter', 0),
+                    'right_counter': getattr(session, 'right_counter', 0),
+                    'feedback': getattr(session, 'current_feedback', ''),
+                    'audio_key': getattr(session, 'current_audio_key', '')
                 }, room=session_id)
                 
             except Exception as e:

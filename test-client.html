@@ -37,13 +37,25 @@
         <input type="range" id="quality" min="1" max="10" value="7" />
         <span id="qualityValue">70%</span>
     </div>
-    
-    <div class="slider-container">
+      <div class="slider-container">
         <label for="resolution">Resolution:</label>
         <select id="resolution">
             <option value="320x240">320x240</option>
             <option value="640x480" selected>640x480</option>
             <option value="1280x720">1280x720</option>
+        </select>
+    </div>
+    
+    <div class="slider-container">
+        <label for="exerciseSelect">Exercise:</label>        <select id="exerciseSelect">
+            <option value="bicep_curl" selected>Bicep Curl</option>
+            <option value="front_raise">Front Raise</option>
+            <option value="side_lateral_raise">Side Lateral Raise</option>
+            <option value="shoulder_raise">Shoulder Raise (using Side Lateral Raise)</option>
+            <option value="shoulder_press">Shoulder Press</option>
+            <option value="triceps_kickback">Triceps Kickback</option>
+            <option value="squat">Squat</option>
+            <option value="push_ups">Push Ups</option>
         </select>
     </div>
 
@@ -109,13 +121,16 @@
         const framesSentElement = document.getElementById('framesSent');
         const framesReceivedElement = document.getElementById('framesReceived');
         const fpsDisplayElement = document.getElementById('fpsDisplay');
-        
-        // Slider elements and their value displays
+          // Slider elements and their value displays
         const frameRateSlider = document.getElementById('frameRate');
         const frameRateValue = document.getElementById('frameRateValue');
         const qualitySlider = document.getElementById('quality');
         const qualityValue = document.getElementById('qualityValue');
         const resolutionSelect = document.getElementById('resolution');
+        const exerciseSelect = document.getElementById('exerciseSelect');
+        
+        // Current exercise selection
+        let selectedExercise = 'bicep_curl';
 
         // Add log entry with timestamp
         function log(message) {
@@ -164,11 +179,24 @@
             imageQuality = parseInt(qualitySlider.value) / 10;
             qualityValue.textContent = `${imageQuality * 100}%`;
         });
-        
-        resolutionSelect.addEventListener('change', () => {
+          resolutionSelect.addEventListener('change', () => {
             const [width, height] = resolutionSelect.value.split('x').map(Number);
             resolution = { width, height };
             log(`Resolution changed to ${width}x${height}`);
+        });
+        
+        exerciseSelect.addEventListener('change', () => {
+            selectedExercise = exerciseSelect.value;
+            log(`Exercise changed to ${selectedExercise}`);
+            
+            // If already connected and streaming, send the new exercise selection
+            if (socket && sessionId && streamActive) {
+                socket.emit('select_exercise', {
+                    exercise: selectedExercise,
+                    session_id: sessionId
+                });
+                log(`Sent exercise selection: ${selectedExercise}`);
+            }
         });
 
         // Start camera
@@ -277,10 +305,9 @@
             framesReceived = 0;
             framesSentElement.textContent = '0';
             framesReceivedElement.textContent = '0';
-            
-            // Select bicep curl exercise by default
+              // Send the currently selected exercise
             socket.emit('select_exercise', {
-                exercise: 'bicep_curl',
+                exercise: selectedExercise,
                 session_id: sessionId
             });
             
