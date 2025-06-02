@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 import os
 os.environ['SDL_AUDIODRIVER'] = 'dummy'
 from flask import Flask, Response, request, jsonify, send_from_directory
@@ -9,9 +12,6 @@ import time
 import base64
 import threading
 import uuid
-import eventlet
-# Move monkey patching before any other imports
-eventlet.monkey_patch() 
 from gtts import gTTS
 import mediapipe as mp
 from utils import calculate_angle, mp_pose, pose
@@ -23,7 +23,6 @@ from exercises.triceps_kickback import triceps_kickback
 from exercises.squat import squat
 from exercises.shoulder_press import shoulder_press
 from exercises.push_ups import push_ups
-from exercises.bicep_curl import hummer as bicep_curl
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -225,60 +224,31 @@ def process_frame_worker(session_id):
                                 nparr = np.frombuffer(frame_data, np.uint8)
                                 processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                                 break
-                elif session.current_exercise == "push_ups":
-                    # Use the push ups exercise generator
-                    for processed_frame in push_ups(sound_objects):
-                        # Extract the frame from the generator
-                        if isinstance(processed_frame, tuple):
-                            frame_data = processed_frame[0]
-                            if frame_data.startswith(b'--frame'):
-                                # Extract the actual image data
-                                frame_data = frame_data.split(b'\r\n\r\n')[1]
-                                frame_data = frame_data.split(b'\r\n')[0]
-                                nparr = np.frombuffer(frame_data, np.uint8)
-                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                break
-                elif session.current_exercise == "bicep_curl":
-                    # Use the bicep curl exercise generator
-                    for processed_frame in bicep_curl(sound_objects):
-                        # Extract the frame from the generator
-                        if isinstance(processed_frame, tuple):
-                            frame_data = processed_frame[0]
-                            if frame_data.startswith(b'--frame'):
-                                # Extract the actual image data
-                                frame_data = frame_data.split(b'\r\n\r\n')[1]
-                                frame_data = frame_data.split(b'\r\n')[0]
-                                nparr = np.frombuffer(frame_data, np.uint8)
-                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                break
-                elif session.current_exercise == "shoulder_raise":
-                    # Shoulder raise is currently empty, map to side_lateral_raise as a fallback
-                    for processed_frame in side_lateral_raise(sound_objects):
-                        # Extract the frame from the generator
-                        if isinstance(processed_frame, tuple):
-                            frame_data = processed_frame[0]
-                            if frame_data.startswith(b'--frame'):
-                                # Extract the actual image data
-                                frame_data = frame_data.split(b'\r\n\r\n')[1]
-                                frame_data = frame_data.split(b'\r\n')[0]
-                                nparr = np.frombuffer(frame_data, np.uint8)
-                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                break
                 else:
-                    # Default fallback to bicep curl
-                    for processed_frame in bicep_curl(sound_objects):
-                        # Extract the frame from the generator
-                        if isinstance(processed_frame, tuple):
-                            frame_data = processed_frame[0]
-                            if frame_data.startswith(b'--frame'):
-                                # Extract the actual image data
-                                frame_data = frame_data.split(b'\r\n\r\n')[1]
-                                frame_data = frame_data.split(b'\r\n')[0]
-                                nparr = np.frombuffer(frame_data, np.uint8)
-                                processed_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                break                
-                # Update session data - for generator-based exercises, we don't get results back
-                # Session counters and state would be managed differently if needed
+                    # Use the bicep curl exercise
+                    from exercises.bicep_curl import process_frame
+                    processed_frame, results = process_frame(
+                        frame, 
+                        session.left_counter, 
+                        session.right_counter,
+                        session.left_state,
+                        session.right_state,
+                        session.current_audio_key,
+                        session.current_feedback,
+                        session.last_feedback_time,
+                        sound_objects
+                    )
+                
+                # Update session data for bicep curl
+                if session.current_exercise != "front_raise":
+                    session.left_counter = results['left_counter']
+                    session.right_counter = results['right_counter']
+                    session.left_state = results['left_state']
+                    session.right_state = results['right_state']
+                    session.current_audio_key = results['current_audio_key']
+                    session.current_feedback = results['current_feedback']
+                    session.last_feedback_time = results['last_feedback_time']
+                
                 session.frame_count += 1
                 
                 # Record response time for metrics
@@ -287,13 +257,14 @@ def process_frame_worker(session_id):
                 # Optimize image encoding while keeping quality reasonable
                 _, buffer = cv2.imencode('.jpg', processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 encoded_img = base64.b64encode(buffer).decode('utf-8')
-                  # Send feedback to client
+                
+                # Send feedback to client
                 socketio.emit('frame', {
                     'image': f'data:image/jpeg;base64,{encoded_img}',
-                    'left_counter': getattr(session, 'left_counter', 0),
-                    'right_counter': getattr(session, 'right_counter', 0),
-                    'feedback': getattr(session, 'current_feedback', ''),
-                    'audio_key': getattr(session, 'current_audio_key', '')
+                    'left_counter': session.left_counter,
+                    'right_counter': session.right_counter,
+                    'feedback': session.current_feedback,
+                    'audio_key': session.current_audio_key
                 }, room=session_id)
                 
             except Exception as e:
@@ -324,9 +295,8 @@ def handle_connect():
     # Create a queue for this session
     frame_queues[session_id] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
     
-    # Start a worker thread for this session
-    thread = threading.Thread(target=process_frame_worker, args=(session_id,), daemon=True)
-    thread.start()
+    # Start a worker thread for this session using eventlet.spawn
+    eventlet.spawn(process_frame_worker, session_id)
     
     emit('session_id', {'session_id': session_id})
     logger.info(f"Client connected: {session_id}")
@@ -419,9 +389,8 @@ def start_session():
     # Create a queue for this session
     frame_queues[session_id] = queue.Queue(maxsize=MAX_QUEUE_SIZE)
     
-    # Start a worker thread for this session
-    thread = threading.Thread(target=process_frame_worker, args=(session_id,), daemon=True)
-    thread.start()
+    # Start a worker thread for this session using eventlet.spawn
+    eventlet.spawn(process_frame_worker, session_id)
     
     return jsonify({'session_id': session_id})
 
@@ -488,9 +457,8 @@ def cleanup_sessions():
         # Sleep for 60 seconds before next cleanup
         time.sleep(60)
 
-# Start cleanup thread
-cleanup_thread = threading.Thread(target=cleanup_sessions, daemon=True)
-cleanup_thread.start()
+# Start cleanup thread using eventlet.spawn
+cleanup_thread = eventlet.spawn(cleanup_sessions)
 
 def process_frames(user_id):
     """Process frames for a user session"""
@@ -499,10 +467,6 @@ def process_frames(user_id):
     
     session = user_sessions[user_id]
     frame_queue = session.frame_queue
-    
-    # Initialize pygame mixer if not already initialized
-    if not pygame.mixer.get_init():
-        pygame.mixer.init()
     
     # Create a sound object for alerts
     sound = pygame.mixer.Sound("audio/alert.mp3")

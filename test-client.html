@@ -14,10 +14,24 @@
         .slider-container { margin: 10px 0; }
         label { display: inline-block; width: 150px; }
         select, input[type="range"] { width: 200px; }
+        .exercise-select { margin: 10px 0; }
     </style>
 </head>
 <body>
     <h1>WebSocket Frame Test - Optimized</h1>
+    
+    <div class="exercise-select">
+        <label for="exerciseType">Exercise Type:</label>
+        <select id="exerciseType">
+            <option value="bicep_curl">Bicep Curl</option>
+            <option value="front_raise">Front Raise</option>
+            <option value="side_lateral_raise">Side Lateral Raise</option>
+            <option value="triceps_kickback">Triceps Kickback</option>
+            <option value="squat">Squat</option>
+            <option value="shoulder_press">Shoulder Press</option>
+            <option value="push_ups">Push Ups</option>
+        </select>
+    </div>
     
     <div class="controls">
         <button id="startCamera">Start Camera</button>
@@ -37,25 +51,13 @@
         <input type="range" id="quality" min="1" max="10" value="7" />
         <span id="qualityValue">70%</span>
     </div>
-      <div class="slider-container">
+    
+    <div class="slider-container">
         <label for="resolution">Resolution:</label>
         <select id="resolution">
             <option value="320x240">320x240</option>
             <option value="640x480" selected>640x480</option>
             <option value="1280x720">1280x720</option>
-        </select>
-    </div>
-    
-    <div class="slider-container">
-        <label for="exerciseSelect">Exercise:</label>        <select id="exerciseSelect">
-            <option value="bicep_curl" selected>Bicep Curl</option>
-            <option value="front_raise">Front Raise</option>
-            <option value="side_lateral_raise">Side Lateral Raise</option>
-            <option value="shoulder_raise">Shoulder Raise (using Side Lateral Raise)</option>
-            <option value="shoulder_press">Shoulder Press</option>
-            <option value="triceps_kickback">Triceps Kickback</option>
-            <option value="squat">Squat</option>
-            <option value="push_ups">Push Ups</option>
         </select>
     </div>
 
@@ -108,6 +110,7 @@
         let frameInterval = 1000 / frameRate;
         let imageQuality = 0.7;
         let resolution = { width: 640, height: 480 };
+        let currentExercise = 'bicep_curl';
 
         // DOM elements
         const videoElement = document.getElementById('videoElement');
@@ -121,16 +124,14 @@
         const framesSentElement = document.getElementById('framesSent');
         const framesReceivedElement = document.getElementById('framesReceived');
         const fpsDisplayElement = document.getElementById('fpsDisplay');
-          // Slider elements and their value displays
+        const exerciseTypeSelect = document.getElementById('exerciseType');
+        
+        // Slider elements and their value displays
         const frameRateSlider = document.getElementById('frameRate');
         const frameRateValue = document.getElementById('frameRateValue');
         const qualitySlider = document.getElementById('quality');
         const qualityValue = document.getElementById('qualityValue');
         const resolutionSelect = document.getElementById('resolution');
-        const exerciseSelect = document.getElementById('exerciseSelect');
-        
-        // Current exercise selection
-        let selectedExercise = 'bicep_curl';
 
         // Add log entry with timestamp
         function log(message) {
@@ -179,24 +180,11 @@
             imageQuality = parseInt(qualitySlider.value) / 10;
             qualityValue.textContent = `${imageQuality * 100}%`;
         });
-          resolutionSelect.addEventListener('change', () => {
+        
+        resolutionSelect.addEventListener('change', () => {
             const [width, height] = resolutionSelect.value.split('x').map(Number);
             resolution = { width, height };
             log(`Resolution changed to ${width}x${height}`);
-        });
-        
-        exerciseSelect.addEventListener('change', () => {
-            selectedExercise = exerciseSelect.value;
-            log(`Exercise changed to ${selectedExercise}`);
-            
-            // If already connected and streaming, send the new exercise selection
-            if (socket && sessionId && streamActive) {
-                socket.emit('select_exercise', {
-                    exercise: selectedExercise,
-                    session_id: sessionId
-                });
-                log(`Sent exercise selection: ${selectedExercise}`);
-            }
         });
 
         // Start camera
@@ -227,67 +215,90 @@
 
         // Connect to server
         document.getElementById('connect').addEventListener('click', () => {
-            log(`Connecting to ${serverUrl}...`);
-            statusElement.textContent = 'Connecting...';
+            if (socket) {
+                socket.disconnect();
+            }
             
             socket = io(serverUrl, {
                 transports: ['websocket'],
                 reconnection: true,
                 reconnectionAttempts: 5,
-                reconnectionDelay: 1000,
-                timeout: 20000
+                reconnectionDelay: 1000
             });
             
             socket.on('connect', () => {
                 log('Connected to server');
                 statusElement.textContent = 'Connected';
-            });
-            
-            socket.on('session_id', (data) => {
-                sessionId = data.session_id;
-                log(`Session established: ${sessionId}`);
-                statusElement.textContent = `Session: ${sessionId.substring(0, 8)}...`;
-            });
-            
-            socket.on('frame', (data) => {
-                if (data.image) {
-                    // Calculate latency
-                    if (lastFrameSentTime > 0) {
-                        const now = performance.now();
-                        const latency = now - lastFrameSentTime;
-                        latencyValues.push(latency);
-                        
-                        // Update latency display periodically
-                        if (now - lastLatencyUpdate > 500) {
-                            updateLatency();
-                            lastLatencyUpdate = now;
-                        }
+                
+                // Start a new session
+                fetch(`${serverUrl}/api/start_session`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
                     }
+                })
+                .then(response => response.json())
+                .then(data => {
+                    sessionId = data.session_id;
+                    log(`Session started: ${sessionId}`);
                     
-                    // Update UI
-                    responseImage.src = data.image;
-                    framesReceived++;
-                    framesReceivedElement.textContent = framesReceived;
-                    leftCounterElement.textContent = data.left_counter || 0;
-                    rightCounterElement.textContent = data.right_counter || 0;
-                    feedbackElement.textContent = data.feedback || '';
-                    
-                    // Update FPS counter
-                    frameCount++;
-                    updateFPS();
-                }
-            });
-            
-            socket.on('error', (data) => {
-                log(`Error: ${data.message}`);
-                statusElement.textContent = `Error: ${data.message}`;
+                    // Select the exercise type
+                    socket.emit('select_exercise', {
+                        exercise: currentExercise
+                    });
+                })
+                .catch(error => {
+                    log(`Session error: ${error.message}`);
+                    statusElement.textContent = `Error: ${error.message}`;
+                });
             });
             
             socket.on('disconnect', () => {
                 log('Disconnected from server');
                 statusElement.textContent = 'Disconnected';
-                stopSendingFrames();
             });
+            
+            socket.on('frame', (data) => {
+                framesReceived++;
+                framesReceivedElement.textContent = framesReceived;
+                
+                if (data.image) {
+                    responseImage.src = data.image;
+                    frameCount++;
+                    updateFPS();
+                }
+                
+                if (data.left_counter !== undefined) {
+                    leftCounterElement.textContent = data.left_counter;
+                }
+                
+                if (data.right_counter !== undefined) {
+                    rightCounterElement.textContent = data.right_counter;
+                }
+                
+                if (data.feedback) {
+                    feedbackElement.textContent = data.feedback;
+                }
+                
+                // Calculate latency
+                const now = performance.now();
+                if (lastFrameSentTime > 0) {
+                    const latency = now - lastFrameSentTime;
+                    latencyValues.push(latency);
+                    updateLatency();
+                }
+            });
+        });
+
+        // Exercise type change handler
+        exerciseTypeSelect.addEventListener('change', () => {
+            currentExercise = exerciseTypeSelect.value;
+            if (socket && socket.connected) {
+                socket.emit('select_exercise', {
+                    exercise: currentExercise
+                });
+                log(`Exercise changed to: ${currentExercise}`);
+            }
         });
 
         // Start sending frames at regular intervals
@@ -305,11 +316,6 @@
             framesReceived = 0;
             framesSentElement.textContent = '0';
             framesReceivedElement.textContent = '0';
-              // Send the currently selected exercise
-            socket.emit('select_exercise', {
-                exercise: selectedExercise,
-                session_id: sessionId
-            });
             
             // Start the animation frame loop
             requestAnimationId = requestAnimationFrame(processVideoFrame);
